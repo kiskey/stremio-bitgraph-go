@@ -5,8 +5,8 @@ go 1.23
 require (
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/jackc/pgx/v5 v5.7.1
-	github.com/ovrlord-app/releasetitleparser v0.0.0-20240101000000-000000000000
-	github.com/xrash/smetrics v0.0.0-20240506012145-ea8f8da11c01
+	github.com/ovrlord-app/releasetitleparser@latest
+	github.com/xrash/smetrics@latest
 	golang.org/x/sync v0.9.0
 )
 
