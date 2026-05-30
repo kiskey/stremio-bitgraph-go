@@ -14,6 +14,7 @@ type ParseResult struct {
 	Year     int
 	Language string
 	Quality  string
+	IsPack   bool
 }
 
 var languageToISO = map[rtp.Language]string{
@@ -66,7 +67,7 @@ var languageToISO = map[rtp.Language]string{
 	rtp.LanguageMongolian:     "mn",
 	rtp.LanguageGeorgian:      "ka",
 	rtp.LanguageRomansh:       "rm",
-	rtp.LanguageOriginal:    "original",
+	rtp.LanguageOriginal:      "original",
 	rtp.LanguageCatalan:       "ca",
 	rtp.LanguageAzerbaijani:   "az",
 	rtp.LanguageUzbek:         "uz",
@@ -130,6 +131,7 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 			Year:     info.SeriesTitleInfo.Year,
 			Language: lang,
 			Quality:  getQuality(info.Quality.Quality.Resolution),
+			IsPack:   IsPack(info),
 		}
 	}
 
