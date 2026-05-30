@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,8 +16,6 @@ import (
 	"github.com/user/stremio-bitgraph-go/internal/debrid"
 	"github.com/user/stremio-bitgraph-go/internal/matcher"
 	"github.com/user/stremio-bitgraph-go/internal/parser"
-	"encoding/json"
-	"strconv"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
 )
 
@@ -22,6 +23,24 @@ func NewRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/"+config.AddonID+"/stream/{type}/{id}/{infoHash}", streamResolveHandler)
 	return r
+}
+
+func isTerminalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "magnet_error") ||
+		strings.Contains(msg, "virus") ||
+		strings.Contains(msg, "rejected") ||
+		errors.Is(err, debrid.ErrResourceNotFound)
+}
+
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "timed out")
 }
 
 func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
@@ -39,7 +58,6 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 		season, episode = parts[1], parts[2]
 	}
 
-	// Handle client disconnect
 	go func() {
 		<-r.Context().Done()
 		cancel()
@@ -51,9 +69,16 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check processing lock
+	if cachedURL, _ := debrid.URLCache.Get(ctx, infoHash); cachedURL != nil {
+		if urlStr, ok := cachedURL["url"].(string); ok && urlStr != "" {
+			http.Redirect(w, r, urlStr, http.StatusFound)
+			return
+		}
+	}
+
 	var torrentInfo *debrid.TorrentInfo
 	var lockEntry *matcher.ProcessingLock
+
 	if raw, ok := matcher.ProcessingLocks.Load(infoHash); ok {
 		lockEntry = raw.(*matcher.ProcessingLock)
 		switch lockEntry.State {
@@ -63,7 +88,6 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if lockEntry.Data != nil {
-				// reconstruct from lock data
 				info := lockEntry.Data
 				if ti, ok := info["id"].(string); ok {
 					torrentInfo = &debrid.TorrentInfo{ID: ti}
@@ -88,6 +112,7 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			case <-ctx.Done():
 				http.Error(w, "Client closed request", 499)
+				matcher.ProcessingLocks.Delete(infoHash)
 				return
 			}
 		case "FAILED":
@@ -96,7 +121,14 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check DB cache
+	if torrentInfo == nil {
+		if cached, _ := debrid.TorrentInfoCache.Get(ctx, infoHash); cached != nil {
+			if data, ok := cached["torrent_info"].(*debrid.TorrentInfo); ok {
+				torrentInfo = data
+			}
+		}
+	}
+
 	if torrentInfo == nil && config.DebridProvider != "" {
 		row := db.Pool.QueryRow(ctx,
 			"SELECT torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2 AND content_type = $3 AND provider = $4",
@@ -106,7 +138,6 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 		if err == nil && len(jsonData) > 0 {
 			var data map[string]interface{}
 			if err := json.Unmarshal(jsonData, &data); err == nil {
-				// reconstruct
 				if id, ok := data["id"].(string); ok {
 					torrentInfo = &debrid.TorrentInfo{ID: id}
 					if fn, ok := data["filename"].(string); ok {
@@ -140,7 +171,6 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Start new debrid process
 	if torrentInfo == nil {
 		utils.Logger.Info("no cache hit, starting debrid process", "hash", infoHash)
 
@@ -156,7 +186,15 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 
 		func() {
 			defer func() {
+				if ctx.Err() == context.Canceled {
+					matcher.ProcessingLocks.Delete(infoHash)
+					return
+				}
 				if processErr != nil {
+					if isTerminalError(processErr) && torrentID != "" {
+						utils.Logger.Warn("terminal error, deleting torrent", "id", torrentID)
+						provider.DeleteTorrent(ctx, torrentID)
+					}
 					lock.State = "FAILED"
 					lock.Error = processErr
 					close(lock.Promise)
@@ -220,7 +258,7 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 						time.Sleep(2 * time.Second)
 						info, err := provider.GetTorrentInfo(ctx, torrentID)
 						if err != nil {
-							if strings.Contains(err.Error(), "not found") {
+							if strings.Contains(err.Error(), "not found") || errors.Is(err, debrid.ErrResourceNotFound) {
 								continue
 							}
 							processErr = err
@@ -271,7 +309,10 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 				lang = parsed.Language
 			}
 
-			// Save to DB
+			debrid.TorrentInfoCache.Set(ctx, infoHash, map[string]interface{}{
+				"torrent_info": readyTorrent,
+			})
+
 			_, _ = db.Pool.Exec(ctx,
 				`INSERT INTO torrents (infohash, tmdb_id, content_type, provider, torrent_info_json, language, quality, seeders)
 				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -279,13 +320,13 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 				 DO UPDATE SET torrent_info_json = EXCLUDED.torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
 				infoHash, imdbID, typ, config.DebridProvider, readyTorrent, lang, utils.GetQuality(readyTorrent.Filename), readyTorrent.Seeders)
 
-			// Resolve download URL
 			url, err := resolveDownloadURL(ctx, provider, readyTorrent, typ, season, episode)
 			if err != nil {
 				processErr = err
 				return
 			}
 			downloadURL = url
+			debrid.URLCache.Set(ctx, infoHash, map[string]interface{}{"url": downloadURL})
 		}()
 
 		if processErr != nil {
@@ -301,7 +342,6 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If we have torrentInfo but no downloadURL yet
 	url, err := resolveDownloadURL(ctx, provider, torrentInfo, typ, season, episode)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -313,6 +353,7 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 			le.DownloadURL = url
 		}
 	}
+	debrid.URLCache.Set(ctx, infoHash, map[string]interface{}{"url": url})
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
@@ -437,7 +478,7 @@ func pollTorrentUntilReady(ctx context.Context, torrentID string, provider debri
 
 		info, err := provider.GetTorrentInfo(ctx, torrentID)
 		if err != nil {
-			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "429") {
+			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "429") || errors.Is(err, debrid.ErrResourceNotFound) {
 				utils.Logger.Warn("transient error polling", "id", torrentID, "error", err, "attempt", attempt+1)
 				time.Sleep(baseInterval + time.Duration(attempt)*100*time.Millisecond)
 				continue
@@ -454,7 +495,12 @@ func pollTorrentUntilReady(ctx context.Context, torrentID string, provider debri
 			return info, nil
 		}
 		utils.Logger.Debug("torrent polling", "id", torrentID, "status", info.Status, "attempt", attempt+1)
-		time.Sleep(baseInterval + time.Duration(attempt)*100*time.Millisecond)
+		
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("aborted")
+		case <-time.After(baseInterval + time.Duration(attempt)*100*time.Millisecond):
+		}
 	}
 	return nil, fmt.Errorf("torrent %s polling timed out after %d attempts", torrentID, maxAttempts)
 }
