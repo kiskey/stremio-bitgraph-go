@@ -1,9 +1,13 @@
 package debrid
 
 import (
+	"context"
 	"sync"
 	"time"
 )
+
+var TorrentInfoCache = NewMemoryCache(12 * time.Hour)
+var URLCache = NewMemoryCache(1 * time.Hour)
 
 type MemoryCache struct {
 	store map[string]cacheEntry
@@ -25,9 +29,14 @@ func NewMemoryCache(ttl time.Duration) *MemoryCache {
 
 func (m *MemoryCache) Get(_ context.Context, key string) (map[string]interface{}, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	entry, ok := m.store[key]
+	m.mu.RUnlock()
 	if !ok || time.Now().After(entry.expires) {
+		if ok {
+			m.mu.Lock()
+			delete(m.store, key)
+			m.mu.Unlock()
+		}
 		return nil, nil
 	}
 	return entry.value, nil
@@ -52,6 +61,13 @@ func (m *MemoryCache) Update(_ context.Context, key string, updates map[string]i
 	}
 	entry.expires = time.Now().Add(m.ttl)
 	m.store[key] = entry
+	return nil
+}
+
+func (m *MemoryCache) Delete(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.store, key)
 	return nil
 }
 
