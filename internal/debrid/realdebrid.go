@@ -1,3 +1,4 @@
+
 package debrid
 
 import (
@@ -51,7 +52,7 @@ func (r *realDebridProvider) AddMagnet(ctx context.Context, magnet string) (*Add
 		return nil, fmt.Errorf("addMagnet status %d", resp.StatusCode)
 	}
 	var data map[string]interface{}
-	if err := jsonDecode(resp, &data); err != nil {
+	if err := rdJsonDecode(resp, &data); err != nil {
 		return nil, err
 	}
 	id, _ := data["id"].(string)
@@ -72,7 +73,7 @@ func (r *realDebridProvider) GetTorrentInfo(ctx context.Context, id string) (*To
 		return nil, fmt.Errorf("getTorrentInfo status %d", resp.StatusCode)
 	}
 	var data map[string]interface{}
-	if err := jsonDecode(resp, &data); err != nil {
+	if err := rdJsonDecode(resp, &data); err != nil {
 		return nil, err
 	}
 	return mapRDInfo(data), nil
@@ -144,7 +145,7 @@ func (r *realDebridProvider) UnrestrictLink(ctx context.Context, link string) (*
 		return nil, fmt.Errorf("unrestrict status %d", resp.StatusCode)
 	}
 	var data map[string]interface{}
-	if err := jsonDecode(resp, &data); err != nil {
+	if err := rdJsonDecode(resp, &data); err != nil {
 		return nil, err
 	}
 	dl, _ := data["download"].(string)
@@ -168,7 +169,7 @@ func (r *realDebridProvider) GetTorrents(ctx context.Context) ([]Torrent, error)
 	}
 	defer resp.Body.Close()
 	var data []map[string]interface{}
-	if err := jsonDecode(resp, &data); err != nil {
+	if err := rdJsonDecode(resp, &data); err != nil {
 		return nil, err
 	}
 	var torrents []Torrent
@@ -210,6 +211,6 @@ func (r *realDebridProvider) GetCachedFileInfo(ctx context.Context, hash, fileNa
 	return nil, fmt.Errorf("not supported for real-debrid")
 }
 
-func jsonDecode(resp *http.Response, v interface{}) error {
+func rdJsonDecode(resp *http.Response, v interface{}) error {
 	return json.NewDecoder(resp.Body).Decode(v)
 }
