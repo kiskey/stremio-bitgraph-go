@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -9,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/user/stremio-bitgraph-go/internal/addon"
 	"github.com/user/stremio-bitgraph-go/internal/api"
 	"github.com/user/stremio-bitgraph-go/internal/config"
@@ -24,27 +26,23 @@ func main() {
 	}
 	defer db.Pool.Close()
 
-	// Start API server
-	apiServer := &http.Server{
-		Addr:    fmt.Sprintf(":%d", config.APIPort),
-		Handler: api.NewRouter(),
-	}
-	go func() {
-		utils.Logger.Info("API server listening", "addr", apiServer.Addr)
-		if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			utils.Logger.Error("API server error", "error", err)
-		}
-	}()
+	// Create a unified root router
+	r := chi.NewRouter()
+	
+	// Mount both handlers onto the root namespace
+	r.Mount("/", addon.NewRouter())
+	r.Mount("/", api.NewRouter())
 
-	// Start addon server
-	addonServer := &http.Server{
+	// Start unified server
+	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", config.Port),
-		Handler: addon.NewRouter(),
+		Handler: r,
 	}
+
 	go func() {
-		utils.Logger.Info("addon server listening", "addr", addonServer.Addr)
-		if err := addonServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			utils.Logger.Error("addon server error", "error", err)
+		utils.Logger.Info("unified server listening", "addr", server.Addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			utils.Logger.Error("server error", "error", err)
 		}
 	}()
 
@@ -57,7 +55,6 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	apiServer.Shutdown(shutdownCtx)
-	addonServer.Shutdown(shutdownCtx)
-	utils.Logger.Info("servers shut down gracefully")
+	server.Shutdown(shutdownCtx)
+	utils.Logger.Info("server shut down gracefully")
 }
