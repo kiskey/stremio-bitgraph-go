@@ -1,12 +1,17 @@
 package debrid
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+var ErrResourceNotFound = errors.New("resource not found")
 
 type AddResult struct {
-	ID      string
-	Hash    string
-	Name    string
-	Cached  bool
+	ID     string
+	Hash   string
+	Name   string
+	Cached bool
 }
 
 type TorrentInfo struct {
@@ -61,4 +66,6 @@ type Provider interface {
 	GetTorrents(ctx context.Context) ([]Torrent, error)
 	CheckCached(ctx context.Context, hashes []string) (map[string]CacheStatus, error)
 	GetDownloadLinkForFile(ctx context.Context, torrentID, fileID string) (string, error)
+	AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error)
+	GetCachedFileInfo(ctx context.Context, hash, fileName string) (*FileInfo, error)
 }
