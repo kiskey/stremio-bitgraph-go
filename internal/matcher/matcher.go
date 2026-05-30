@@ -258,10 +258,11 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 			continue
 		}
 		sim := getTitleSimilarity(tmdbMovie.Title, torrentData.Name)
+		utils.Logger.Debug("evaluating movie torrent", "name", torrentData.Name, "similarity", fmt.Sprintf("%.2f", sim))
 		if sim < config.SimilarityThreshold {
 			continue
 		}
-		
+
 		parsed := parser.RobustParseInfo(torrentData.Name, 0)
 		yearMatch := true
 		if parsed.Year != 0 && tmdbYear != "" {
@@ -300,6 +301,7 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 
 func SortAndFilterStreams(streams, cachedStreams []Stream, preferredLanguages []string) []Stream {
 	all := append(cachedStreams, streams...)
+
 	if config.StrictLanguageFilter && len(preferredLanguages) > 0 {
 		prefSet := make(map[string]bool)
 		for _, l := range preferredLanguages {
@@ -312,6 +314,7 @@ func SortAndFilterStreams(streams, cachedStreams []Stream, preferredLanguages []
 			}
 		}
 		all = filtered
+		utils.Logger.Debug("strict language filter applied", "kept", len(all))
 	}
 
 	langIndex := make(map[string]int)
@@ -365,7 +368,6 @@ func SortAndFilterStreams(streams, cachedStreams []Stream, preferredLanguages []
 	return final
 }
 
-// ProcessingLock is used by the API server to prevent duplicate debrid calls for the same hash.
 type ProcessingLock struct {
 	State       string // PROCESSING, COMPLETED, FAILED
 	Data        map[string]interface{}
