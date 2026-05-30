@@ -207,6 +207,7 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if processErr != nil {
+					utils.Logger.Error("debrid process failed", "hash", infoHash, "error", processErr)
 					if isTerminalError(processErr) && torrentID != "" {
 						utils.Logger.Warn("terminal error, deleting torrent", "id", torrentID)
 						provider.DeleteTorrent(context.Background(), torrentID)
