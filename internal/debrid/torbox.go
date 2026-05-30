@@ -1,3 +1,4 @@
+
 package debrid
 
 import (
@@ -187,7 +188,7 @@ func (t *torboxProvider) AddMagnet(ctx context.Context, magnet string) (*AddResu
 			break
 		}
 		var data map[string]interface{}
-		if err := jsonDecode(resp, &data); err != nil {
+		if err := tbJsonDecode(resp, &data); err != nil {
 			lastErr = err
 			break
 		}
@@ -233,7 +234,7 @@ func (t *torboxProvider) GetTorrentInfo(ctx context.Context, id string) (*Torren
 		return nil, ErrResourceNotFound
 	}
 	var data map[string]interface{}
-	if err := jsonDecode(resp, &data); err != nil {
+	if err := tbJsonDecode(resp, &data); err != nil {
 		return nil, err
 	}
 	list, _ := data["data"].([]interface{})
@@ -309,7 +310,7 @@ func (t *torboxProvider) SelectFiles(ctx context.Context, id string, fileIDs []s
 	}
 	defer resp.Body.Close()
 	var data map[string]interface{}
-	if err := jsonDecode(resp, &data); err != nil {
+	if err := tbJsonDecode(resp, &data); err != nil {
 		return err
 	}
 	list, _ := data["data"].([]interface{})
@@ -384,7 +385,7 @@ func (t *torboxProvider) GetTorrents(ctx context.Context) ([]Torrent, error) {
 	}
 	defer resp.Body.Close()
 	var data map[string]interface{}
-	if err := jsonDecode(resp, &data); err != nil {
+	if err := tbJsonDecode(resp, &data); err != nil {
 		return nil, err
 	}
 	list, _ := data["data"].([]interface{})
@@ -421,7 +422,7 @@ func (t *torboxProvider) CheckCached(ctx context.Context, hashes []string) (map[
 	}
 	defer resp.Body.Close()
 	var data map[string]interface{}
-	if err := jsonDecode(resp, &data); err != nil {
+	if err := tbJsonDecode(resp, &data); err != nil {
 		return nil, err
 	}
 	payload, _ := data["data"].(map[string]interface{})
@@ -470,7 +471,7 @@ func (t *torboxProvider) GetDownloadLinkForFile(ctx context.Context, torrentID, 
 	}
 	defer resp.Body.Close()
 	var data map[string]interface{}
-	if err := jsonDecode(resp, &data); err != nil {
+	if err := tbJsonDecode(resp, &data); err != nil {
 		return "", err
 	}
 	payload, _ := data["data"].(map[string]interface{})
@@ -518,7 +519,7 @@ func (t *torboxProvider) AddAndSelect(ctx context.Context, magnet string) (*Torr
 	return nil, fmt.Errorf("addAndSelect failed")
 }
 
-func jsonDecode(resp *http.Response, v interface{}) error {
+func tbJsonDecode(resp *http.Response, v interface{}) error {
 	return json.NewDecoder(resp.Body).Decode(v)
 }
 
