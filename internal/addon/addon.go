@@ -43,8 +43,22 @@ type Stream struct {
 	BehaviorHints map[string]interface{} `json:"behaviorHints,omitempty"`
 }
 
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func NewRouter() http.Handler {
 	r := chi.NewRouter()
+	r.Use(corsMiddleware)
 	r.Get("/manifest.json", manifestHandler)
 	r.Get("/stream/{type}/{id}.json", streamHandler)
 	return r
