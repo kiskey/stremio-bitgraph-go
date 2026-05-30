@@ -23,7 +23,8 @@ import (
 func NewRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Use(corsMiddleware)
-	r.Get("/"+config.AddonID+"/stream/{type}/{id}/{infoHash}", streamResolveHandler)
+	// Prefix removed as it is now handled by the parent Mount() in main.go
+	r.Get("/stream/{type}/{id}/{infoHash}", streamResolveHandler)
 	return r
 }
 
