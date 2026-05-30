@@ -97,6 +97,12 @@ func (c *DBCache) Update(ctx context.Context, hash string, updates map[string]in
 	return err
 }
 
+func (c *DBCache) Delete(ctx context.Context, hash string) error {
+	query := fmt.Sprintf("DELETE FROM %s WHERE provider = $1 AND hash = $2", c.table)
+	_, err := db.Pool.Exec(ctx, query, c.provider, hash)
+	return err
+}
+
 func (c *DBCache) GetByProviderID(ctx context.Context, id string) (map[string]interface{}, error) {
 	query := fmt.Sprintf("SELECT * FROM %s WHERE provider = $1 AND provider_torrent_id = $2", c.table)
 	row := db.Pool.QueryRow(ctx, query, c.provider, id)
