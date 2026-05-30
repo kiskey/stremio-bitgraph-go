@@ -10,7 +10,7 @@ import (
 
 type disabledProvider struct{}
 
-func (d *disabledProvider) IsEnabled() bool                                       { return false }
+func (d *disabledProvider) IsEnabled() bool { return false }
 func (d *disabledProvider) AddMagnet(ctx context.Context, magnet string) (*AddResult, error) {
 	return nil, fmt.Errorf("debrid not configured")
 }
@@ -38,6 +38,12 @@ func (d *disabledProvider) CheckCached(ctx context.Context, hashes []string) (ma
 }
 func (d *disabledProvider) GetDownloadLinkForFile(ctx context.Context, torrentID, fileID string) (string, error) {
 	return "", fmt.Errorf("debrid not configured")
+}
+func (d *disabledProvider) AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error) {
+	return nil, fmt.Errorf("debrid not configured")
+}
+func (d *disabledProvider) GetCachedFileInfo(ctx context.Context, hash, fileName string) (*FileInfo, error) {
+	return nil, fmt.Errorf("debrid not configured")
 }
 
 var instance Provider
