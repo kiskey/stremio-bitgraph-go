@@ -35,11 +35,11 @@ type StreamResponse struct {
 }
 
 type Stream struct {
-	Name          string            `json:"name"`
-	Title         string            `json:"title"`
-	URL           string            `json:"url,omitempty"`
-	InfoHash      string            `json:"infoHash,omitempty"`
-	FileIdx       int               `json:"fileIdx,omitempty"`
+	Name          string                 `json:"name"`
+	Title         string                 `json:"title"`
+	URL           string                 `json:"url,omitempty"`
+	InfoHash      string                 `json:"infoHash,omitempty"`
+	FileIdx       int                    `json:"fileIdx,omitempty"`
 	BehaviorHints map[string]interface{} `json:"behaviorHints,omitempty"`
 }
 
@@ -119,11 +119,11 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			var tinfo map[string]interface{}
 			json.Unmarshal(torrentInfoJSON, &tinfo)
 			cachedRows = append(cachedRows, map[string]interface{}{
-				"infohash":            infohash,
-				"language":            language,
-				"quality":             quality,
-				"seeders":             seeders,
-				"torrent_info_json":   tinfo,
+				"infohash":          infohash,
+				"language":          language,
+				"quality":           quality,
+				"seeders":           seeders,
+				"torrent_info_json": tinfo,
 			})
 		}
 	}
@@ -143,7 +143,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		refinedTorrents, _ := bitmagnet.SearchTorrents(ctx, refinedQuery, "tv_show", 50)
 		refinedResult, _ := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, season, episode, refinedTorrents, cachedRows, config.PreferredLanguages)
 		resultStreams = refinedResult
-		cachedStreams = cachedStreams // populated inside FindBestSeriesStreams
+		cachedStreams = cachedStreams
 
 		if len(refinedTorrents) < 10 || len(resultStreams) == 0 {
 			broadTorrents, _ := bitmagnet.SearchTorrents(ctx, meta.Name, "tv_show", 100)
@@ -180,13 +180,15 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 
 	provider := debrid.LoadProvider()
 	if provider.IsEnabled() {
-		if _, ok := provider.(interface{ CheckCached(context.Context, []string) (map[string]debrid.CacheStatus, error) }); ok {
+		if cachedProvider, ok := provider.(interface {
+			CheckCached(context.Context, []string) (map[string]debrid.CacheStatus, error)
+		}); ok {
 			hashes := make([]string, len(sorted))
 			for i, s := range sorted {
 				hashes[i] = s.InfoHash
 			}
 			if len(hashes) > 0 {
-				cacheStatus, err := provider.CheckCached(ctx, hashes)
+				cacheStatus, err := cachedProvider.CheckCached(ctx, hashes)
 				if err != nil {
 					utils.Logger.Warn("checkCached failed", "error", err)
 				} else {
@@ -194,23 +196,22 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 						cs := cacheStatus[sorted[i].InfoHash]
 						sorted[i].IsCached = cs.Cached
 						if cs.Cached && cs.TorrentID != "" {
-							files := make([]map[string]interface{}, len(cs.Files))
-							for j, f := range cs.Files {
-								files[j] = map[string]interface{}{
-									"id":       f.ID,
-									"path":     f.Name,
-									"bytes":    f.Size,
-									"selected": 1,
-								}
+							torrentInfo := &debrid.TorrentInfo{
+								ID:       cs.TorrentID,
+								Filename: cs.Name,
+								Status:   "downloaded",
 							}
-							resolved := map[string]interface{}{
-								"id":       cs.TorrentID,
-								"filename": cs.Name,
-								"files":    files,
-								"status":   "downloaded",
+							for _, f := range cs.Files {
+								torrentInfo.Files = append(torrentInfo.Files, debrid.FileInfo{
+									ID:       f.ID,
+									Path:     f.Name,
+									Bytes:    f.Size,
+									Selected: 1,
+								})
 							}
-							// Store in memory cache
-							_ = resolved
+							debrid.TorrentInfoCache.Set(ctx, sorted[i].InfoHash, map[string]interface{}{
+								"torrent_info": torrentInfo,
+							})
 						}
 					}
 				}
