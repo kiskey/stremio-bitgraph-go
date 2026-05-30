@@ -29,9 +29,12 @@ func main() {
 	// Create a unified root router
 	r := chi.NewRouter()
 	
-	// Mount both handlers onto the root namespace
+	// Mount API sub-router under its specific addon-id path prefix.
+	// This prevents the duplicate '/' mount panic.
+	r.Mount("/"+config.AddonID, api.NewRouter())
+	
+	// Mount the core addon sub-router on the root path
 	r.Mount("/", addon.NewRouter())
-	r.Mount("/", api.NewRouter())
 
 	// Start unified server
 	server := &http.Server{
