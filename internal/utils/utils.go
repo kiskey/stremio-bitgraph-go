@@ -7,23 +7,22 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode"
 )
 
 var Logger *slog.Logger
+var LogLevelVar = new(slog.LevelVar)
+var LogLevel string
 
 func init() {
-	lvl := slog.LevelInfo
-	switch strings.ToLower(LogLevel) {
-	case "debug":
-		lvl = slog.LevelDebug
-	case "warn":
-		lvl = slog.LevelWarn
-	case "error":
-		lvl = slog.LevelError
+	LogLevel = os.Getenv("LOG_LEVEL")
+	if LogLevel == "" {
+		LogLevel = "info"
 	}
+
+	SetLogLevel(LogLevel)
+
 	Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: lvl,
+		Level: LogLevelVar,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
 				return slog.Attr{Key: slog.TimeKey, Value: slog.StringValue(a.Value.Time().Format("2006-01-02 15:04:05"))}
@@ -31,6 +30,19 @@ func init() {
 			return a
 		},
 	}))
+}
+
+func SetLogLevel(level string) {
+	switch strings.ToLower(level) {
+	case "debug":
+		LogLevelVar.Set(slog.LevelDebug)
+	case "warn":
+		LogLevelVar.Set(slog.LevelWarn)
+	case "error":
+		LogLevelVar.Set(slog.LevelError)
+	default:
+		LogLevelVar.Set(slog.LevelInfo)
+	}
 }
 
 func Sleep(ms int) {
@@ -47,16 +59,30 @@ func FormatSize(bytes int64) string {
 
 func SanitizeName(name string) string {
 	s := name
-	// Remove CJK, Arabic, Cyrillic, Thai, Hangul, Hiragana, Katakana
-	re := regexp.MustCompile(`[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+`)
+	
+	// Remove CJK brackets
+	re := regexp.MustCompile(`【.*?】`)
 	s = re.ReplaceAllString(s, " ")
+
+	// Remove non-ASCII scripts
+	re = regexp.MustCompile(`[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+`)
+	s = re.ReplaceAllString(s, " ")
+
 	// Remove bracketed content with non-word chars
-	s = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`).ReplaceAllString(s, " ")
+	re = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
+	s = re.ReplaceAllString(s, " ")
+
 	// Remove URLs
-	s = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`).ReplaceAllString(s, " ")
+	re = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
+	s = re.ReplaceAllString(s, " ")
+
 	// Remove dashes at boundaries
-	s = regexp.MustCompile(`^\s*[-–—]+\s*|\s*[-–—]+\s*$`).ReplaceAllString(s, " ")
-	s = regexp.MustCompile(`\s+[-–—]+\s+`).ReplaceAllString(s, " ")
+	re = regexp.MustCompile(`^\s*[-–—]+\s*|\s*[-–—]+\s*$`)
+	s = re.ReplaceAllString(s, " ")
+	
+	re = regexp.MustCompile(`\s+[-–—]+\s+`)
+	s = re.ReplaceAllString(s, " ")
+
 	s = strings.ReplaceAll(s, "_", " ")
 	s = strings.Join(strings.Fields(s), " ")
 	return s
@@ -94,12 +120,3 @@ func GetQuality(resolution string) string {
 	}
 	return "sd"
 }
-
-// LogLevel is imported from config in the real build; here we read directly for utils init
-var LogLevel = func() string {
-	l := os.Getenv("LOG_LEVEL")
-	if l == "" {
-		return "info"
-	}
-	return l
-}()
