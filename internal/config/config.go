@@ -1,3 +1,4 @@
+
 package config
 
 import (
@@ -42,7 +43,7 @@ func init() {
 	APIPort = Port + 1
 	AppHost = os.Getenv("APP_HOST")
 	if AppHost == "" {
-		AppHost = fmt.Sprintf("http://127.0.0.1:%d", APIPort)
+		AppHost = fmt.Sprintf("http://127.0.0.1:%d", Port)
 	}
 	LogLevel = os.Getenv("LOG_LEVEL")
 	if LogLevel == "" {
