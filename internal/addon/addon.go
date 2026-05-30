@@ -1,3 +1,4 @@
+
 package addon
 
 import (
@@ -15,7 +16,6 @@ import (
 	"github.com/user/stremio-bitgraph-go/internal/debrid"
 	"github.com/user/stremio-bitgraph-go/internal/matcher"
 	"github.com/user/stremio-bitgraph-go/internal/metadata"
-	"github.com/user/stremio-bitgraph-go/internal/parser"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
 )
 
