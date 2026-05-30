@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/user/stremio-bitgraph-go/internal/bitmagnet"
@@ -17,7 +16,6 @@ import (
 	"github.com/user/stremio-bitgraph-go/internal/matcher"
 	"github.com/user/stremio-bitgraph-go/internal/metadata"
 	"github.com/user/stremio-bitgraph-go/internal/parser"
-	"encoding/json"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
 )
 
@@ -172,7 +170,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		movieResult, movieCached := matcher.FindBestMovieStreams(&bitmagnet.TorrentItem{Title: meta.Name}, torrents, cachedRows, config.PreferredLanguages)
+		movieResult, movieCached := matcher.FindBestMovieStreams(&bitmagnet.TorrentItem{Title: meta.Name}, meta.Year, torrents, cachedRows, config.PreferredLanguages)
 		resultStreams = movieResult
 		cachedStreams = movieCached
 	}
@@ -268,8 +266,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			url := fmt.Sprintf("%s/%s/stream/%s/%s/%s", config.AppHost, config.AddonID, typ, id, s.InfoHash)
 			streams = append(streams, Stream{
 				Name:  fmt.Sprintf("[%s RD] %s | %s", prefix, strings.ToUpper(s.Language), strings.ToUpper(s.Quality)),
-				Title: fmt.Sprintf("%s
-💾 %s | 👤 %d seeders", s.TorrentName, utils.FormatSize(s.Size), s.Seeders),
+				Title: fmt.Sprintf("%s\n💾 %s | 👤 %d seeders", s.TorrentName, utils.FormatSize(s.Size), s.Seeders),
 				URL:   url,
 			})
 		}
@@ -281,8 +278,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			streams = append(streams, Stream{
 				Name:          fmt.Sprintf("[Bitgraph P2P] %s | %s", strings.ToUpper(s.Language), strings.ToUpper(s.Quality)),
-				Title:         fmt.Sprintf("%s
-💾 %s | 👤 %d seeders", s.TorrentName, utils.FormatSize(s.Size), s.Seeders),
+				Title:         fmt.Sprintf("%s\n💾 %s | 👤 %d seeders", s.TorrentName, utils.FormatSize(s.Size), s.Seeders),
 				InfoHash:      s.InfoHash,
 				FileIdx:       s.FileIndex,
 				BehaviorHints: bh,
