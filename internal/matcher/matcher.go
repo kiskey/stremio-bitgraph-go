@@ -1,7 +1,9 @@
 package matcher
 
 import (
+	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -129,6 +131,13 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 		bestLang := getBestLanguage(torrent.Languages, preferredLanguages)
 		parsed := parser.RobustParseInfo(torrentData.Name, 0)
+		if bestLang == "en" && parsed.Language != "en" && parsed.Language != "" {
+			bestLang = parsed.Language
+		}
+		quality := utils.GetQuality(torrent.VideoResolution)
+		if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
+			quality = parsed.Quality
+		}
 
 		if parsed.Season == season && parsed.Episode == episode {
 			streams = append(streams, Stream{
@@ -137,7 +146,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 				TorrentName: torrentData.Name,
 				Seeders:     torrent.Seeders,
 				Language:    bestLang,
-				Quality:     utils.GetQuality(torrent.VideoResolution),
+				Quality:     quality,
 				Size:        torrentData.Size,
 				IsCached:    false,
 			})
@@ -160,7 +169,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 					TorrentName: torrentData.Name,
 					Seeders:     torrent.Seeders,
 					Language:    bestLang,
-					Quality:     utils.GetQuality(torrent.VideoResolution),
+					Quality:     quality,
 					Size:        torrentData.Size,
 					IsCached:    false,
 				})
@@ -188,7 +197,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 							TorrentName: torrentData.Name,
 							Seeders:     torrent.Seeders,
 							Language:    bestLang,
-							Quality:     utils.GetQuality(torrent.VideoResolution),
+							Quality:     quality,
 							Size:        torrentData.Size,
 							IsCached:    false,
 						})
@@ -205,7 +214,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 	return streams, cachedStreams
 }
 
-func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
 	for _, torrent := range cachedRows {
 		infoHash, _ := torrent["infohash"].(string)
 		lang, _ := torrent["language"].(string)
@@ -252,23 +261,36 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, newTorrents []bitmag
 		if sim < config.SimilarityThreshold {
 			continue
 		}
+		
 		parsed := parser.RobustParseInfo(torrentData.Name, 0)
 		yearMatch := true
-		if parsed.Year != 0 && tmdbMovie.Torrent.Name != "" {
-			// We don't have release_date in TorrentItem; use tmdbMovie.Year if available
-			// Actually the original passes movieMetaForMatcher with release_date
-			// In our Go version, we'll pass the year separately
+		if parsed.Year != 0 && tmdbYear != "" {
+			y, err := strconv.Atoi(tmdbYear)
+			if err == nil {
+				if parsed.Year < y-1 || parsed.Year > y+1 {
+					yearMatch = false
+				}
+			}
 		}
 		if !yearMatch {
 			continue
 		}
+
 		bestLang := getBestLanguage(torrent.Languages, preferredLanguages)
+		if bestLang == "en" && parsed.Language != "en" && parsed.Language != "" {
+			bestLang = parsed.Language
+		}
+		quality := utils.GetQuality(torrent.VideoResolution)
+		if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
+			quality = parsed.Quality
+		}
+
 		streams = append(streams, Stream{
 			InfoHash:    torrent.InfoHash,
 			TorrentName: torrentData.Name,
 			Seeders:     torrent.Seeders,
 			Language:    bestLang,
-			Quality:     utils.GetQuality(torrent.VideoResolution),
+			Quality:     quality,
 			Size:        torrentData.Size,
 			IsCached:    false,
 		})
