@@ -66,7 +66,7 @@ func (r *realDebridProvider) GetTorrentInfo(ctx context.Context, id string) (*To
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 404 {
-		return nil, fmt.Errorf("resource not found")
+		return nil, ErrResourceNotFound
 	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("getTorrentInfo status %d", resp.StatusCode)
@@ -124,6 +124,7 @@ func (r *realDebridProvider) SelectFiles(ctx context.Context, id string, fileIDs
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 202 {
+		utils.Logger.Info("real-debrid files already selected", "id", id)
 		return nil
 	}
 	if resp.StatusCode != 204 {
@@ -182,7 +183,6 @@ func (r *realDebridProvider) GetTorrents(ctx context.Context) ([]Torrent, error)
 }
 
 func (r *realDebridProvider) CheckCached(ctx context.Context, hashes []string) (map[string]CacheStatus, error) {
-	// Real-Debrid has no bulk checkCached endpoint; return all false
 	result := make(map[string]CacheStatus)
 	for _, h := range hashes {
 		result[h] = CacheStatus{Cached: false}
@@ -192,6 +192,22 @@ func (r *realDebridProvider) CheckCached(ctx context.Context, hashes []string) (
 
 func (r *realDebridProvider) GetDownloadLinkForFile(ctx context.Context, torrentID, fileID string) (string, error) {
 	return "", fmt.Errorf("not supported for real-debrid")
+}
+
+func (r *realDebridProvider) AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error) {
+	addRes, err := r.AddMagnet(ctx, magnet)
+	if err != nil {
+		return nil, err
+	}
+	err = r.SelectFiles(ctx, addRes.ID, []string{"all"})
+	if err != nil {
+		return nil, err
+	}
+	return r.GetTorrentInfo(ctx, addRes.ID)
+}
+
+func (r *realDebridProvider) GetCachedFileInfo(ctx context.Context, hash, fileName string) (*FileInfo, error) {
+	return nil, fmt.Errorf("not supported for real-debrid")
 }
 
 func jsonDecode(resp *http.Response, v interface{}) error {
