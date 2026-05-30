@@ -1,4 +1,3 @@
---- START OF FILE stremio-bitgraph-go/Dockerfile ---
 # Build stage
 FROM golang:1.23-alpine AS builder
 WORKDIR /app
@@ -22,4 +21,3 @@ COPY migrations ./migrations
 
 EXPOSE 7000 7001
 CMD ["./server"]
---- END OF FILE stremio-bitgraph-go/Dockerfile ---
