@@ -96,10 +96,17 @@ func mapRDInfo(data map[string]interface{}) *TorrentInfo {
 			fid, _ := fm["id"].(float64)
 			path, _ := fm["path"].(string)
 			bytes, _ := fm["bytes"].(float64)
+			
+			selected := 0
+			if sVal, ok := fm["selected"].(float64); ok {
+				selected = int(sVal)
+			}
+
 			info.Files = append(info.Files, FileInfo{
-				ID:    int(fid),
-				Path:  path,
-				Bytes: int64(bytes),
+				ID:       int(fid),
+				Path:     path,
+				Bytes:    int64(bytes),
+				Selected: selected,
 			})
 		}
 	}
