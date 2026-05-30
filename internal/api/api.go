@@ -1,3 +1,4 @@
+
 package api
 
 import (
@@ -21,8 +22,22 @@ import (
 
 func NewRouter() http.Handler {
 	r := chi.NewRouter()
+	r.Use(corsMiddleware)
 	r.Get("/"+config.AddonID+"/stream/{type}/{id}/{infoHash}", streamResolveHandler)
 	return r
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func isTerminalError(err error) bool {
@@ -193,7 +208,7 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 				if processErr != nil {
 					if isTerminalError(processErr) && torrentID != "" {
 						utils.Logger.Warn("terminal error, deleting torrent", "id", torrentID)
-						provider.DeleteTorrent(ctx, torrentID)
+						provider.DeleteTorrent(context.Background(), torrentID)
 					}
 					lock.State = "FAILED"
 					lock.Error = processErr
@@ -480,14 +495,22 @@ func pollTorrentUntilReady(ctx context.Context, torrentID string, provider debri
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "429") || errors.Is(err, debrid.ErrResourceNotFound) {
 				utils.Logger.Warn("transient error polling", "id", torrentID, "error", err, "attempt", attempt+1)
-				time.Sleep(baseInterval + time.Duration(attempt)*100*time.Millisecond)
+				select {
+				case <-ctx.Done():
+					return nil, fmt.Errorf("aborted")
+				case <-time.After(baseInterval + time.Duration(attempt)*100*time.Millisecond):
+				}
 				continue
 			}
 			return nil, err
 		}
 		if info == nil {
 			utils.Logger.Warn("null info polling", "id", torrentID, "attempt", attempt+1)
-			time.Sleep(baseInterval + time.Duration(attempt)*100*time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("aborted")
+			case <-time.After(baseInterval + time.Duration(attempt)*100*time.Millisecond):
+			}
 			continue
 		}
 		if readyStatuses[info.Status] {
