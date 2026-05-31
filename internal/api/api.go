@@ -222,7 +222,7 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 					lock.Error = processErr
 					close(lock.Promise)
 					go func() {
-						time.Sleep(5 * time.Minute)
+						time.Sleep(5 * time.Second) // Lock evicted in 5 seconds on fail to allow fast-retry
 						matcher.ProcessingLocks.Delete(infoHash)
 					}()
 				} else {
@@ -533,8 +533,13 @@ func pollTorrentUntilReady(ctx context.Context, torrentID string, provider debri
 		}
 
 		if readyStatuses[info.Status] {
+			// Restored: clear INFO level logging for download success observability
+			utils.Logger.Info("torrent ready for streaming", "id", torrentID, "status", info.Status, "filename", info.Filename)
 			return info, nil
 		}
+
+		// Active progress monitoring inside the container logs
+		utils.Logger.Info("torrent polling progress", "id", torrentID, "status", info.Status, "attempt", attempt+1)
 
 		// Fast exit for terminal failures
 		if strings.Contains("magnet_error,error,virus,dead", info.Status) {
