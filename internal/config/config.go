@@ -50,9 +50,9 @@ func init() {
 		LogLevel = "info"
 	}
 
-	AddonID = "org.stremio.realdebrid.bitmagnet"
-	AddonName = "Bitmagnet RD"
-	AddonVersion = "3.0.0"
+	AddonID = "org.stremio.go.bitmagnet"
+	AddonName = "GoMagnet"
+	AddonVersion = "7.0"
 
 	RealDebridAPIKey = os.Getenv("REALDEBRID_API_KEY")
 	TmdbAPIKey = os.Getenv("TMDB_API_KEY")
