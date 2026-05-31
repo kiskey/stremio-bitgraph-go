@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 var Logger *slog.Logger
@@ -78,37 +79,42 @@ func FormatSize(bytes int64) string {
 	return fmt.Sprintf("%.2f GB", gb)
 }
 
+var epPatternRegex = regexp.MustCompile(`(?i)(S\d+)?[\s\-_]*\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
+var urlRegex = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
+var bracketRegex = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
+
 func SanitizeName(name string) string {
 	s := name
 
-	// Normalize special unicode spaces (e.g. \u00a0, \u200b) to standard ASCII spaces
+	// 1. Normalize special unicode spaces (e.g. \u00a0, \u200b) to standard spaces
 	s = strings.ReplaceAll(s, "\u00a0", " ")
 	s = strings.ReplaceAll(s, "\u200b", " ")
 
-	// Remove CJK brackets
-	re := regexp.MustCompile(`【.*?】`)
-	s = re.ReplaceAllString(s, " ")
+	// 2. Collapse spacing on custom EP representations
+	s = epPatternRegex.ReplaceAllString(s, "${1}E${2}")
 
-	// Remove non-ASCII scripts
-	re = regexp.MustCompile(`[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+`)
-	s = re.ReplaceAllString(s, " ")
+	// 3. Remove non-ASCII scripts (Chinese, Cyrillic, Japanese, etc.)
+	var b strings.Builder
+	for _, r := range s {
+		if r > unicode.MaxASCII {
+			b.WriteRune(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	s = b.String()
 
-	// Remove bracketed content with non-word chars
-	re = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
-	s = re.ReplaceAllString(s, " ")
+	// 4. Remove residual URLs/domains (e.g. www.BTHDTV.com)
+	s = urlRegex.ReplaceAllString(s, " ")
 
-	// Remove URLs
-	re = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
-	s = re.ReplaceAllString(s, " ")
+	// 5. Remove residual empty/garbage brackets
+	s = bracketRegex.ReplaceAllString(s, " ")
 
-	// Remove dashes at boundaries
-	re = regexp.MustCompile(`^\s*[-–—]+\s*|\s*[-–—]+\s*$`)
-	s = re.ReplaceAllString(s, " ")
-	re = regexp.MustCompile(`\s+[-–—]+\s+`)
-	s = re.ReplaceAllString(s, " ")
-
-	s = strings.ReplaceAll(s, "_", " ")
 	s = strings.Join(strings.Fields(s), " ")
+
+	// 6. Trim leftover leading/trailing punctuation
+	s = strings.TrimLeft(s, " .-_[]()/\\")
+	s = strings.TrimRight(s, " .-_[]()/\\")
 	return s
 }
 
