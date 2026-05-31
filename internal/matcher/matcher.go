@@ -1,8 +1,10 @@
+
 package matcher
 
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +14,8 @@ import (
 	"github.com/user/stremio-bitgraph-go/internal/parser"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
 	"github.com/xrash/smetrics"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 )
 
 type Stream struct {
@@ -78,6 +82,38 @@ func findFileInTorrentInfo(torrentInfo map[string]interface{}, season, episode i
 	return false
 }
 
+func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.TorrentItem) map[string][]bitmagnet.TorrentFile {
+	var mu sync.Mutex
+	result := make(map[string][]bitmagnet.TorrentFile)
+
+	g, ctx := errgroup.WithContext(ctx)
+	sem := semaphore.NewWeighted(6)
+
+	for _, t := range torrents {
+		if t.Torrent.FilesStatus != "multi" || !t.Torrent.HasFilesInfo {
+			continue
+		}
+		t := t
+		g.Go(func() error {
+			if err := sem.Acquire(ctx, 1); err != nil {
+				return err
+			}
+			defer sem.Release(1)
+
+			files, err := bitmagnet.GetTorrentFiles(ctx, t.InfoHash)
+			if err != nil {
+				return nil
+			}
+			mu.Lock()
+			result[t.InfoHash] = files
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait()
+	return result
+}
+
 func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
 	for _, torrent := range cachedRows {
 		if findFileInTorrentInfo(torrent, season, episode) {
@@ -115,6 +151,21 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 		}
 	}
 
+	var multiFileTorrents []bitmagnet.TorrentItem
+	for _, torrent := range newTorrents {
+		if cachedHashes[torrent.InfoHash] {
+			continue
+		}
+		if torrent.Torrent.FilesStatus == "multi" && torrent.Torrent.HasFilesInfo {
+			multiFileTorrents = append(multiFileTorrents, torrent)
+		}
+	}
+
+	filesMap := fetchTorrentFilesConcurrent(ctx, multiFileTorrents)
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
 	for _, torrent := range newTorrents {
 		if cachedHashes[torrent.InfoHash] {
 			continue
@@ -123,94 +174,99 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 		if torrentData.Name == "" {
 			continue
 		}
-		sim := getTitleSimilarity(tmdbShow.Title, torrentData.Name)
-		utils.Logger.Debug("evaluating series torrent", "name", torrentData.Name, "similarity", fmt.Sprintf("%.2f", sim))
-		if sim < config.SimilarityThreshold {
-			continue
-		}
 
-		bestLang := getBestLanguage(torrent.Languages, preferredLanguages)
-		parsed := parser.RobustParseInfo(torrentData.Name, 0)
-		if bestLang == "en" && parsed.Language != "en" && parsed.Language != "" {
-			bestLang = parsed.Language
-		}
-		quality := utils.GetQuality(torrent.VideoResolution)
-		if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
-			quality = parsed.Quality
-		}
+		wg.Add(1)
+		go func(t bitmagnet.TorrentItem, td bitmagnet.TorrentItem_Torrent) {
+			defer wg.Done()
 
-		if parsed.Season == season && parsed.Episode == episode {
-			streams = append(streams, Stream{
-				InfoHash:    torrent.InfoHash,
-				FileIndex:   0,
-				TorrentName: torrentData.Name,
-				Seeders:     torrent.Seeders,
-				Language:    bestLang,
-				Quality:     quality,
-				Size:        torrentData.Size,
-				IsCached:    false,
-			})
-			continue
-		}
-
-		if parsed.Season != 0 && parsed.Episode != 0 {
-			continue
-		}
-
-		if parsed.Season == season {
-			if !torrentData.HasFilesInfo {
-				utils.Logger.Warn("rejected: hasFilesInfo=false", "name", torrentData.Name)
-				continue
+			sim := getTitleSimilarity(tmdbShow.Title, td.Name)
+			utils.Logger.Debug("evaluating series torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
+			if sim < config.SimilarityThreshold {
+				return
 			}
-			if torrentData.FilesStatus == "single" {
+
+			bestLang := getBestLanguage(t.Languages, preferredLanguages)
+			parsed := parser.RobustParseInfo(td.Name, 0)
+			if bestLang == "en" && parsed.Language != "en" && parsed.Language != "" {
+				bestLang = parsed.Language
+			}
+			quality := utils.GetQuality(t.VideoResolution)
+			if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
+				quality = parsed.Quality
+			}
+
+			if parsed.Season == season && parsed.Episode == episode {
+				mu.Lock()
 				streams = append(streams, Stream{
-					InfoHash:    torrent.InfoHash,
+					InfoHash:    t.InfoHash,
 					FileIndex:   0,
-					TorrentName: torrentData.Name,
-					Seeders:     torrent.Seeders,
+					TorrentName: td.Name,
+					Seeders:     t.Seeders,
 					Language:    bestLang,
 					Quality:     quality,
-					Size:        torrentData.Size,
+					Size:        td.Size,
 					IsCached:    false,
 				})
-			} else if torrentData.FilesStatus == "multi" {
-				files, err := bitmagnet.GetTorrentFiles(ctx, torrent.InfoHash)
-				if err != nil || len(files) == 0 {
-					continue
-				}
-				var videoFiles []bitmagnet.TorrentFile
-				for _, f := range files {
-					if f.FileType == "video" {
-						videoFiles = append(videoFiles, f)
+				mu.Unlock()
+				return
+			}
+
+			if parsed.Season != 0 && parsed.Episode != 0 {
+				return
+			}
+
+			if parsed.Season == season {
+				if td.FilesStatus == "single" {
+					mu.Lock()
+					streams = append(streams, Stream{
+						InfoHash:    t.InfoHash,
+						FileIndex:   0,
+						TorrentName: td.Name,
+						Seeders:     t.Seeders,
+						Language:    bestLang,
+						Quality:     quality,
+						Size:        td.Size,
+						IsCached:    false,
+					})
+					mu.Unlock()
+				} else if td.FilesStatus == "multi" {
+					files, ok := filesMap[t.InfoHash]
+					if !ok || len(files) == 0 {
+						return
 					}
-				}
-				if len(videoFiles) == 0 {
-					continue
-				}
-				found := false
-				for _, vf := range videoFiles {
-					fileInfo := parser.ParseFilePath(vf.Path, parsed.Season)
-					if fileInfo.Season == season && fileInfo.Episode == episode {
-						streams = append(streams, Stream{
-							InfoHash:    torrent.InfoHash,
-							FileIndex:   vf.Index,
-							TorrentName: torrentData.Name,
-							Seeders:     torrent.Seeders,
-							Language:    bestLang,
-							Quality:     quality,
-							Size:        torrentData.Size,
-							IsCached:    false,
-						})
-						found = true
-						break
+					var videoFiles []bitmagnet.TorrentFile
+					for _, f := range files {
+						if f.FileType == "video" {
+							videoFiles = append(videoFiles, f)
+						}
 					}
-				}
-				if !found {
-					continue
+					if len(videoFiles) == 0 {
+						return
+					}
+					for _, vf := range videoFiles {
+						fileInfo := parser.ParseFilePath(vf.Path, parsed.Season)
+						if fileInfo.Season == season && fileInfo.Episode == episode {
+							mu.Lock()
+							streams = append(streams, Stream{
+								InfoHash:    t.InfoHash,
+								FileIndex:   vf.Index,
+								TorrentName: td.Name,
+								Seeders:     t.Seeders,
+								Language:    bestLang,
+								Quality:     quality,
+								Size:        td.Size,
+								IsCached:    false,
+							})
+							mu.Unlock()
+							break
+						}
+					}
 				}
 			}
-		}
+		}(torrent, torrentData)
 	}
+
+	wg.Wait()
 	return streams, cachedStreams
 }
 
@@ -249,6 +305,9 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 		}
 	}
 
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
 	for _, torrent := range newTorrents {
 		if cachedHashes[torrent.InfoHash] {
 			continue
@@ -257,45 +316,55 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 		if torrentData.Name == "" {
 			continue
 		}
-		sim := getTitleSimilarity(tmdbMovie.Title, torrentData.Name)
-		utils.Logger.Debug("evaluating movie torrent", "name", torrentData.Name, "similarity", fmt.Sprintf("%.2f", sim))
-		if sim < config.SimilarityThreshold {
-			continue
-		}
 
-		parsed := parser.RobustParseInfo(torrentData.Name, 0)
-		yearMatch := true
-		if parsed.Year != 0 && tmdbYear != "" {
-			y, err := strconv.Atoi(tmdbYear)
-			if err == nil {
-				if parsed.Year < y-1 || parsed.Year > y+1 {
-					yearMatch = false
+		wg.Add(1)
+		go func(t bitmagnet.TorrentItem, td bitmagnet.TorrentItem_Torrent) {
+			defer wg.Done()
+
+			sim := getTitleSimilarity(tmdbMovie.Title, td.Name)
+			utils.Logger.Debug("evaluating movie torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
+			if sim < config.SimilarityThreshold {
+				return
+			}
+			
+			parsed := parser.RobustParseInfo(td.Name, 0)
+			yearMatch := true
+			if parsed.Year != 0 && tmdbYear != "" {
+				y, err := strconv.Atoi(tmdbYear)
+				if err == nil {
+					if parsed.Year < y-1 || parsed.Year > y+1 {
+						yearMatch = false
+					}
 				}
 			}
-		}
-		if !yearMatch {
-			continue
-		}
+			if !yearMatch {
+				return
+			}
 
-		bestLang := getBestLanguage(torrent.Languages, preferredLanguages)
-		if bestLang == "en" && parsed.Language != "en" && parsed.Language != "" {
-			bestLang = parsed.Language
-		}
-		quality := utils.GetQuality(torrent.VideoResolution)
-		if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
-			quality = parsed.Quality
-		}
+			bestLang := getBestLanguage(t.Languages, preferredLanguages)
+			if bestLang == "en" && parsed.Language != "en" && parsed.Language != "" {
+				bestLang = parsed.Language
+			}
+			quality := utils.GetQuality(t.VideoResolution)
+			if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
+				quality = parsed.Quality
+			}
 
-		streams = append(streams, Stream{
-			InfoHash:    torrent.InfoHash,
-			TorrentName: torrentData.Name,
-			Seeders:     torrent.Seeders,
-			Language:    bestLang,
-			Quality:     quality,
-			Size:        torrentData.Size,
-			IsCached:    false,
-		})
+			mu.Lock()
+			streams = append(streams, Stream{
+				InfoHash:    t.InfoHash,
+				TorrentName: td.Name,
+				Seeders:     t.Seeders,
+				Language:    bestLang,
+				Quality:     quality,
+				Size:        td.Size,
+				IsCached:    false,
+			})
+			mu.Unlock()
+		}(torrent, torrentData)
 	}
+
+	wg.Wait()
 	return streams, cachedStreams
 }
 
@@ -328,33 +397,24 @@ func SortAndFilterStreams(streams, cachedStreams []Stream, preferredLanguages []
 		return 9999
 	}
 
-	// sort
-	for i := 0; i < len(all)-1; i++ {
-		for j := i + 1; j < len(all); j++ {
-			a, b := all[i], all[j]
-			swap := false
-			if a.IsCached && !b.IsCached {
-				swap = false
-			} else if !a.IsCached && b.IsCached {
-				swap = true
-			} else {
-				la, lb := getLangPriority(a.Language), getLangPriority(b.Language)
-				if la != lb {
-					swap = la > lb
-				} else {
-					qa, qb := utils.QualityOrder[a.Quality], utils.QualityOrder[b.Quality]
-					if qa != qb {
-						swap = qa > qb
-					} else {
-						swap = a.Seeders < b.Seeders
-					}
-				}
-			}
-			if swap {
-				all[i], all[j] = all[j], all[i]
-			}
+	sort.Slice(all, func(i, j int) bool {
+		a, b := all[i], all[j]
+		if a.IsCached && !b.IsCached {
+			return true
 		}
-	}
+		if !a.IsCached && b.IsCached {
+			return false
+		}
+		la, lb := getLangPriority(a.Language), getLangPriority(b.Language)
+		if la != lb {
+			return la < lb
+		}
+		qa, qb := utils.QualityOrder[a.Quality], utils.QualityOrder[b.Quality]
+		if qa != qb {
+			return qa < qb
+		}
+		return a.Seeders > b.Seeders
+	})
 
 	var final []Stream
 	counts := make(map[string]int)
