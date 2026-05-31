@@ -1,7 +1,8 @@
-
+--- START OF FILE stremio-bitgraph-go/internal/parser/parser.go ---
 package parser
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -74,6 +75,13 @@ var languageToISO = map[rtp.Language]string{
 	rtp.LanguageUzbek:         "uz",
 }
 
+var epPatternRegex = regexp.MustCompile(`(?i)\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
+
+// normalizeEpisodePatterns normalizes custom tracker markers like "EP(07)" or "EP 07" to "E07"
+func normalizeEpisodePatterns(s string) string {
+	return epPatternRegex.ReplaceAllString(s, "E$1")
+}
+
 func getISO(lang rtp.Language) string {
 	if iso, ok := languageToISO[lang]; ok {
 		return iso
@@ -99,15 +107,18 @@ func getQuality(res int) string {
 }
 
 func SanitizeName(name string) string {
+	// Normalize custom episode representations first
+	s := normalizeEpisodePatterns(name)
+
 	var b strings.Builder
-	for _, r := range name {
+	for _, r := range s {
 		if r > unicode.MaxASCII {
 			b.WriteRune(' ')
 			continue
 		}
 		b.WriteRune(r)
 	}
-	s := b.String()
+	s = b.String()
 	s = strings.Join(strings.Fields(s), " ")
 	
 	// Trim any leftover leading/trailing punctuation left behind by non-ASCII stripping
@@ -166,7 +177,9 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 }
 
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
-	info := rtp.ParseSeriesPath(path)
+	// Normalize custom episode patterns in internal file paths
+	cleanPath := normalizeEpisodePatterns(path)
+	info := rtp.ParseSeriesPath(cleanPath)
 	if info != nil && (info.SeasonNumber != 0 || len(info.EpisodeNumbers) > 0) {
 		episode := 0
 		if len(info.EpisodeNumbers) > 0 {
@@ -191,3 +204,4 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 func IsPack(info *rtp.ParsedEpisodeInfo) bool {
 	return info != nil && (info.FullSeason || info.IsPartialSeason || info.IsMultiSeason)
 }
+--- END OF FILE stremio-bitgraph-go/internal/parser/parser.go ---
