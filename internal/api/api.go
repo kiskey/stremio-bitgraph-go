@@ -303,7 +303,6 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 						processErr = fmt.Errorf("timed out waiting for metadata")
 						return
 					}
-					
 					freshInfo, err := provider.GetTorrentInfo(ctx, torrentID)
 					if err != nil {
 						processErr = err
@@ -311,65 +310,12 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 					}
 					
 					if freshInfo != nil && freshInfo.Status == "waiting_files_selection" {
-						var fileIDs []string
-						// Torrentio-style matching: select ONLY the targeted episode file to prevent index shifts
-						parsed := parser.RobustParseInfo(freshInfo.Filename, 0)
-						fallbackSeason := parsed.Season
-						
-						if typ == "series" {
-							sVal, _ := strconv.Atoi(season)
-							eVal, _ := strconv.Atoi(episode)
-							var targetFile *debrid.FileInfo
-							for _, f := range freshInfo.Files {
-								fileInfo := parser.ParseFilePath(f.Path, fallbackSeason)
-								if fileInfo.Season == sVal && fileInfo.Episode == eVal {
-									targetFile = &debrid.FileInfo{
-										ID: f.ID,
-										Path: f.Path,
-										Bytes: f.Bytes,
-									}
-									break
-								}
-							}
-							if targetFile != nil {
-								fileIDs = []string{fmt.Sprintf("%d", targetFile.ID)}
-							}
-						} else {
-							// For movies, select the largest video file
-							var videoFiles []debrid.FileInfo
-							for _, f := range freshInfo.Files {
-								lowerPath := strings.ToLower(f.Path)
-								if strings.HasSuffix(lowerPath, ".mkv") ||
-									strings.HasSuffix(lowerPath, ".mp4") ||
-									strings.HasSuffix(lowerPath, ".avi") ||
-									strings.HasSuffix(lowerPath, ".mov") ||
-									strings.HasSuffix(lowerPath, ".wmv") ||
-									strings.HasSuffix(lowerPath, ".flv") ||
-									strings.HasSuffix(lowerPath, ".webm") {
-									videoFiles = append(videoFiles, debrid.FileInfo{
-										ID: f.ID,
-										Path: f.Path,
-										Bytes: f.Bytes,
-									})
-								}
-							}
-							if len(videoFiles) > 0 {
-								largest := videoFiles[0]
-								for _, vf := range videoFiles[1:] {
-									if vf.Bytes > largest.Bytes {
-										largest = vf
-									}
-								}
-								fileIDs = []string{fmt.Sprintf("%d", largest.ID)}
-							}
-						}
-						
-						// Fallback: select all if no file was matched specifically
-						if len(fileIDs) == 0 {
-							fileIDs = make([]string, len(freshInfo.Files))
-							for i, f := range freshInfo.Files {
-								fileIDs[i] = fmt.Sprintf("%d", f.ID)
-							}
+						// Safe "Select All" logic restored for Real-Debrid.
+						// This ensures that when season packs are added, all episodes are available
+						// for instant playback without the user being locked out on subsequent episode clicks.
+						fileIDs := make([]string, len(freshInfo.Files))
+						for i, f := range freshInfo.Files {
+							fileIDs[i] = fmt.Sprintf("%d", f.ID)
 						}
 						provider.SelectFiles(ctx, torrentID, fileIDs)
 					}
