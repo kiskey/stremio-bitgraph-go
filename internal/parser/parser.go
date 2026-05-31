@@ -1,6 +1,8 @@
+
 package parser
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -73,6 +75,15 @@ var languageToISO = map[rtp.Language]string{
 	rtp.LanguageUzbek:         "uz",
 }
 
+// Collapses spaces and symbols between SXX and EP(XX) to force standard SXXEXX grouping
+var epPatternRegex = regexp.MustCompile(`(?i)(S\d+)?[\s\-_]*\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
+var urlRegex = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
+var bracketRegex = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
+
+func normalizeEpisodePatterns(s string) string {
+	return epPatternRegex.ReplaceAllString(s, "${1}E${2}")
+}
+
 func getISO(lang rtp.Language) string {
 	if iso, ok := languageToISO[lang]; ok {
 		return iso
@@ -98,16 +109,37 @@ func getQuality(res int) string {
 }
 
 func SanitizeName(name string) string {
+	s := name
+
+	// 1. Replace non-breaking spaces (\u00a0, \u200b) to standard spaces
+	s = strings.ReplaceAll(s, "\u00a0", " ")
+	s = strings.ReplaceAll(s, "\u200b", " ")
+
+	// 2. Normalize episode patterns (e.g. S02 EP(15) -> S02E15)
+	s = normalizeEpisodePatterns(s)
+
+	// 3. Remove non-ASCII scripts (Chinese, Cyrillic, Japanese, etc.)
 	var b strings.Builder
-	for _, r := range name {
+	for _, r := range s {
 		if r > unicode.MaxASCII {
 			b.WriteRune(' ')
 			continue
 		}
 		b.WriteRune(r)
 	}
-	s := b.String()
+	s = b.String()
+
+	// 4. Remove residual URLs/domains (e.g. www.BTHDTV.com)
+	s = urlRegex.ReplaceAllString(s, " ")
+
+	// 5. Remove residual empty/garbage brackets
+	s = bracketRegex.ReplaceAllString(s, " ")
+
 	s = strings.Join(strings.Fields(s), " ")
+	
+	// 6. Trim leftover leading/trailing punctuation
+	s = strings.TrimLeft(s, " .-_[]()/\\")
+	s = strings.TrimRight(s, " .-_[]()/\\")
 	return s
 }
 
@@ -161,7 +193,8 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 }
 
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
-	info := rtp.ParseSeriesPath(path)
+	cleanPath := normalizeEpisodePatterns(path)
+	info := rtp.ParseSeriesPath(cleanPath)
 	if info != nil && (info.SeasonNumber != 0 || len(info.EpisodeNumbers) > 0) {
 		episode := 0
 		if len(info.EpisodeNumbers) > 0 {

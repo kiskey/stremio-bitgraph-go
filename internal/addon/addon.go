@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/user/stremio-bitgraph-go/internal/bitmagnet"
@@ -18,6 +20,8 @@ import (
 	"github.com/user/stremio-bitgraph-go/internal/matcher"
 	"github.com/user/stremio-bitgraph-go/internal/metadata"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 )
 
 type Manifest struct {
@@ -43,6 +47,8 @@ type Stream struct {
 	FileIdx       int                    `json:"fileIdx,omitempty"`
 	BehaviorHints map[string]interface{} `json:"behaviorHints,omitempty"`
 }
+
+var searchCache = utils.NewTTLCache(5 * time.Minute)
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -113,39 +119,60 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		contentType = "tv_show"
 	}
 
-	torrents, err := bitmagnet.SearchTorrents(ctx, meta.Name, contentType, 100)
-	if err != nil {
-		json.NewEncoder(w).Encode(StreamResponse{Streams: []Stream{}})
-		return
-	}
-	if len(torrents) == 0 {
-		json.NewEncoder(w).Encode(StreamResponse{Streams: []Stream{}})
-		return
-	}
-
+	var torrents []bitmagnet.TorrentItem
 	var cachedRows []map[string]interface{}
-	if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
-		rows, _ := db.Pool.Query(ctx,
-			"SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
-			imdbID, typ, config.DebridProvider)
-		defer rows.Close()
-		for rows.Next() {
-			var id int
-			var infohash, tmdbID, ct, provider, language, quality string
-			var torrentInfoJSON []byte
-			var seeders int32
-			var addedAt, lastUsedAt interface{}
-			rows.Scan(&id, &infohash, &tmdbID, &ct, &provider, &torrentInfoJSON, &language, &quality, &seeders, &addedAt, &lastUsedAt)
-			var tinfo map[string]interface{}
-			json.Unmarshal(torrentInfoJSON, &tinfo)
-			cachedRows = append(cachedRows, map[string]interface{}{
-				"infohash":          infohash,
-				"language":          language,
-				"quality":           quality,
-				"seeders":           seeders,
-				"torrent_info_json": tinfo,
-			})
+	var searchErr error
+
+	searchCacheKey := fmt.Sprintf("%s_%s_%s", imdbID, typ, meta.Name)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Concurrent Bitmagnet Search + Database Caching check
+	go func() {
+		defer wg.Done()
+		if cachedVal, ok := searchCache.Get(searchCacheKey); ok {
+			torrents = cachedVal.([]bitmagnet.TorrentItem)
+			return
 		}
+		torrents, searchErr = bitmagnet.SearchTorrents(ctx, meta.Name, contentType, 100)
+		if searchErr == nil && len(torrents) > 0 {
+			searchCache.Set(searchCacheKey, torrents)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
+			rows, _ := db.Pool.Query(ctx,
+				"SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
+				imdbID, typ, config.DebridProvider)
+			defer rows.Close()
+			for rows.Next() {
+				var id int
+				var infohash, tmdbID, ct, provider, language, quality string
+				var torrentInfoJSON []byte
+				var seeders int32
+				var addedAt, lastUsedAt interface{}
+				rows.Scan(&id, &infohash, &tmdbID, &ct, &provider, &torrentInfoJSON, &language, &quality, &seeders, &addedAt, &lastUsedAt)
+				var tinfo map[string]interface{}
+				json.Unmarshal(torrentInfoJSON, &tinfo)
+				cachedRows = append(cachedRows, map[string]interface{}{
+					"infohash":          infohash,
+					"language":          language,
+					"quality":           quality,
+					"seeders":           seeders,
+					"torrent_info_json": tinfo,
+				})
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	if searchErr != nil || len(torrents) == 0 {
+		json.NewEncoder(w).Encode(StreamResponse{Streams: []Stream{}})
+		return
 	}
 
 	var resultStreams, cachedStreams []matcher.Stream
@@ -159,14 +186,31 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			sPadded = fmt.Sprintf("S%d", sVal)
 		}
-		refinedQuery := fmt.Sprintf("%s %s", meta.Name, sPadded)
-		refinedTorrents, _ := bitmagnet.SearchTorrents(ctx, refinedQuery, "tv_show", 50)
-		refinedResult, _ := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, season, episode, refinedTorrents, cachedRows, config.PreferredLanguages)
+
+		// Parallel fetch of Refined and Broad query sets
+		var refinedTorrents, broadTorrents []bitmagnet.TorrentItem
+		g, gCtx := errgroup.WithContext(ctx)
+
+		g.Go(func() error {
+			refinedQuery := fmt.Sprintf("%s %s", meta.Name, sPadded)
+			var innerErr error
+			refinedTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, refinedQuery, "tv_show", 50)
+			return innerErr
+		})
+
+		g.Go(func() error {
+			var innerErr error
+			broadTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, meta.Name, "tv_show", 100)
+			return innerErr
+		})
+
+		_ = g.Wait()
+
+		refinedResult, refinedCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, season, episode, refinedTorrents, cachedRows, config.PreferredLanguages)
 		resultStreams = refinedResult
-		cachedStreams = cachedStreams
+		cachedStreams = refinedCached
 
 		if len(refinedTorrents) < 10 || len(resultStreams) == 0 {
-			broadTorrents, _ := bitmagnet.SearchTorrents(ctx, meta.Name, "tv_show", 100)
 			broadResult, broadCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, season, episode, broadTorrents, cachedRows, config.PreferredLanguages)
 			existing := make(map[string]bool)
 			for _, s := range resultStreams {
@@ -190,7 +234,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		movieResult, movieCached := matcher.FindBestMovieStreams(&bitmagnet.TorrentItem{Title: meta.Name}, meta.Year, torrents, cachedRows, config.PreferredLanguages)
+		movieResult, movieCached := matcher.FindBestMovieStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, meta.Year, torrents, cachedRows, config.PreferredLanguages)
 		resultStreams = movieResult
 		cachedStreams = movieCached
 	}
@@ -239,39 +283,63 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fix missing fileIndex for P2P movies
+	// Fix missing fileIndex for P2P movies concurrently
 	if !provider.IsEnabled() {
 		torrentMap := make(map[string]bitmagnet.TorrentItem)
+		var multiHashes []string
 		for _, t := range torrents {
 			torrentMap[t.InfoHash] = t
+			if t.Torrent.FilesStatus == "multi" {
+				multiHashes = append(multiHashes, t.InfoHash)
+			}
 		}
+
+		filesMap := make(map[string][]bitmagnet.TorrentFile)
+		var mu sync.Mutex
+		g, pctx := errgroup.WithContext(ctx)
+		sem := semaphore.NewWeighted(6)
+
+		for _, h := range multiHashes {
+			h := h
+			g.Go(func() error {
+				if err := sem.Acquire(pctx, 1); err != nil {
+					return err
+				}
+				defer sem.Release(1)
+				files, err := bitmagnet.GetTorrentFiles(pctx, h)
+				if err == nil {
+					mu.Lock()
+					filesMap[h] = files
+					mu.Unlock()
+				}
+				return nil
+			})
+		}
+		_ = g.Wait()
+
 		for i := range sorted {
 			if sorted[i].FileIndex == 0 {
 				if t, ok := torrentMap[sorted[i].InfoHash]; ok && t.Torrent.FilesStatus == "multi" {
-					files, err := bitmagnet.GetTorrentFiles(ctx, sorted[i].InfoHash)
-					if err == nil && len(files) > 0 {
-						var videoFiles []bitmagnet.TorrentFile
-						for _, f := range files {
-							if f.FileType == "video" {
-								videoFiles = append(videoFiles, f)
-							}
-						}
-						if len(videoFiles) > 0 {
-							largest := videoFiles[0]
-							for _, vf := range videoFiles[1:] {
-								if vf.Size > largest.Size {
-									largest = vf
-								}
-							}
-							sorted[i].FileIndex = largest.Index
-						} else {
-							sorted[i].FileIndex = 0
-						}
-					} else {
+					files, ok := filesMap[sorted[i].InfoHash]
+					if !ok || len(files) == 0 {
 						sorted[i].FileIndex = 0
+						continue
 					}
-				} else {
-					sorted[i].FileIndex = 0
+					var videoFiles []bitmagnet.TorrentFile
+					for _, f := range files {
+						if f.FileType == "video" {
+							videoFiles = append(videoFiles, f)
+						}
+					}
+					if len(videoFiles) > 0 {
+						largest := videoFiles[0]
+						for _, vf := range videoFiles[1:] {
+							if vf.Size > largest.Size {
+								largest = vf
+							}
+						}
+						sorted[i].FileIndex = largest.Index
+					}
 				}
 			}
 		}

@@ -36,7 +36,7 @@ type CacheStore interface {
 
 func NewTorbox(cache CacheStore) Provider {
 	return &torboxProvider{
-		client:        &http.Client{Timeout: 15 * time.Second},
+		client:        utils.NewOptimizedClient(15 * time.Second),
 		cache:         cache,
 		selections:    make(map[string]map[int]bool),
 		recentAdds:    make(map[string]time.Time),

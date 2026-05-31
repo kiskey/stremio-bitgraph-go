@@ -1,3 +1,4 @@
+
 package bitmagnet
 
 import (
@@ -13,7 +14,7 @@ import (
 	"github.com/user/stremio-bitgraph-go/internal/utils"
 )
 
-var client = &http.Client{Timeout: 15 * time.Second}
+var client = utils.NewOptimizedClient(15 * time.Second)
 
 const torrentContentSearchQuery = `
 query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {

@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/user/stremio-bitgraph-go/internal/utils"
 )
 
 var Pool *pgxpool.Pool
@@ -16,7 +18,20 @@ func InitDB(ctx context.Context) error {
 	if dsn == "" {
 		return fmt.Errorf("DATABASE_URL not set")
 	}
-	pool, err := pgxpool.New(ctx, dsn)
+
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("unable to parse connection string: %w", err)
+	}
+
+	// Single-user resource optimization
+	config.MaxConns = 10
+	config.MinConns = 2
+	config.MaxConnIdleTime = 15 * time.Minute
+	config.MaxConnLifetime = 1 * time.Hour
+	config.HealthCheckPeriod = 1 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return fmt.Errorf("unable to create connection pool: %w", err)
 	}
@@ -62,7 +77,7 @@ func InitDB(ctx context.Context) error {
 				-- Ensure the hash column exists
 				IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='debrid_cache' AND column_name='hash') THEN
 					ALTER TABLE debrid_cache ADD COLUMN hash TEXT NOT NULL DEFAULT '';
-				END IF;
+				END if;
 
 				-- Ensure the unique constraint on (provider, hash) exists
 				IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'debrid_cache_provider_hash_key') THEN
@@ -95,5 +110,26 @@ func InitDB(ctx context.Context) error {
 			return fmt.Errorf("migration failed: %w", err)
 		}
 	}
+
+	// Launch active background maintenance loop (Prunes old entries after 30 days of inactivity)
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				utils.Logger.Info("running database maintenance cleanup...")
+				res, err := Pool.Exec(context.Background(), "DELETE FROM torrents WHERE last_used_at < NOW() - INTERVAL '30 days'")
+				if err != nil {
+					utils.Logger.Error("database cleanup failed", "error", err)
+				} else {
+					rowsAffected := res.RowsAffected()
+					utils.Logger.Info("database maintenance completed successfully", "rows_purged", rowsAffected)
+				}
+			}
+		}
+	}()
+
 	return nil
 }
