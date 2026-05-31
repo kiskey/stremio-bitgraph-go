@@ -498,8 +498,8 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 }
 
 func pollTorrentUntilReady(ctx context.Context, torrentID string, provider debrid.Provider) (*debrid.TorrentInfo, error) {
-	maxAttempts := 90
-	baseInterval := 2000 * time.Millisecond
+	maxAttempts := 60
+	baseDelay := 500 * time.Millisecond
 	readyStatuses := map[string]bool{"downloaded": true, "finished": true}
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -512,36 +512,44 @@ func pollTorrentUntilReady(ctx context.Context, torrentID string, provider debri
 		info, err := provider.GetTorrentInfo(ctx, torrentID)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "429") || errors.Is(err, debrid.ErrResourceNotFound) {
-				utils.Logger.Warn("transient error polling", "id", torrentID, "error", err, "attempt", attempt+1)
 				select {
 				case <-ctx.Done():
 					return nil, fmt.Errorf("aborted")
-				case <-time.After(baseInterval + time.Duration(attempt)*100*time.Millisecond):
+				case <-time.After(baseDelay):
 				}
 				continue
 			}
 			return nil, err
 		}
 		if info == nil {
-			utils.Logger.Warn("null info polling", "id", torrentID, "attempt", attempt+1)
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("aborted")
-			case <-time.After(baseInterval + time.Duration(attempt)*100*time.Millisecond):
+			case <-time.After(baseDelay):
 			}
 			continue
 		}
+
 		if readyStatuses[info.Status] {
-			utils.Logger.Debug("torrent ready", "id", torrentID, "status", info.Status)
 			return info, nil
 		}
-		utils.Logger.Debug("torrent polling", "id", torrentID, "status", info.Status, "attempt", attempt+1)
-		
+
+		// Fast exit for terminal failures
+		if strings.Contains("magnet_error,error,virus,dead", info.Status) {
+			return nil, fmt.Errorf("debrid rejected magnet (%s)", info.Status)
+		}
+
+		// Exponential backoff capped at 3s
+		sleep := baseDelay * time.Duration(1<<attempt)
+		if sleep > 3*time.Second {
+			sleep = 3 * time.Second
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("aborted")
-		case <-time.After(baseInterval + time.Duration(attempt)*100*time.Millisecond):
+		case <-time.After(sleep):
 		}
 	}
-	return nil, fmt.Errorf("torrent %s polling timed out after %d attempts", torrentID, maxAttempts)
+	return nil, fmt.Errorf("torrent %s polling timed out", torrentID)
 }
