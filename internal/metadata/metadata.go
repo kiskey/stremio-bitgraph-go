@@ -4,6 +4,7 @@ package metadata
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -193,7 +194,10 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 	go func() {
 		res, err := fetchTmdb(raceCtx, imdbID, typ)
 		if err != nil {
-			utils.Logger.Warn("TMDB failed", "error", err)
+			// Suppress expected context-canceled warnings caused by racing early-exit
+			if !errors.Is(err, context.Canceled) {
+				utils.Logger.Warn("TMDB failed", "error", err)
+			}
 			tmdbChan <- nil
 			return
 		}
@@ -203,7 +207,10 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 	go func() {
 		res, err := fetchCinemeta(raceCtx, imdbID, typ)
 		if err != nil {
-			utils.Logger.Warn("Cinemeta failed", "error", err)
+			// Suppress expected context-canceled warnings caused by racing early-exit
+			if !errors.Is(err, context.Canceled) {
+				utils.Logger.Warn("Cinemeta failed", "error", err)
+			}
 			cinemetaChan <- nil
 			return
 		}
@@ -234,7 +241,7 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 		}
 		tmdbRes = <-tmdbChan
 		if tmdbRes != nil {
-			metaCache.Set(cacheKey, tmdbRes)
+			metaCache.Store(cacheKey, tmdbRes)
 			return tmdbRes, nil
 		}
 	case <-ctx.Done():
