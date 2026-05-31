@@ -30,6 +30,26 @@ type Stream struct {
 	IsCached    bool
 }
 
+// isBlockedArchive checks if a torrent name is a compressed archive that Stremio cannot play
+func isBlockedArchive(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".rar") ||
+		strings.HasSuffix(lower, ".zip") ||
+		strings.HasSuffix(lower, ".7z") ||
+		strings.HasSuffix(lower, ".tar") ||
+		strings.HasSuffix(lower, ".tgz") ||
+		strings.HasSuffix(lower, ".gz")
+}
+
+func containsNonASCII(s string) bool {
+	for _, r := range s {
+		if r > 127 {
+			return true
+		}
+	}
+	return false
+}
+
 func stripLeadingArticles(s string) string {
 	s = strings.TrimSpace(s)
 	articles := []string{"the ", "a ", "an ", "le ", "la ", "les ", "l'"}
@@ -215,6 +235,12 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 		}
 		torrentData := torrent.Torrent
 		if torrentData.Name == "" {
+			continue
+		}
+
+		// Filter out compressed archives immediately to prevent downstream debrid resolution overhead
+		if isBlockedArchive(torrentData.Name) {
+			utils.Logger.Warn("filtering out series torrent: matches compressed archive pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
 			continue
 		}
 
@@ -410,6 +436,12 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			continue
 		}
 
+		// Filter out compressed archives immediately to prevent downstream debrid resolution overhead
+		if isBlockedArchive(torrentData.Name) {
+			utils.Logger.Warn("filtering out movie torrent: matches compressed archive pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
+			continue
+		}
+
 		t := torrent
 		td := torrentData
 
@@ -452,9 +484,9 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 							strings.HasSuffix(lowerPath, ".mp4") ||
 							strings.HasSuffix(lowerPath, ".avi") ||
 							strings.HasSuffix(lowerPath, ".mov") ||
-							strings.HasSuffix(lowerPath, ".wmv") ||
-							strings.HasSuffix(lowerPath, ".flv") ||
-							strings.HasSuffix(lowerPath, ".webm") {
+							strings.HasSuffix(strings.ToLower(f.Path), ".wmv") ||
+							strings.HasSuffix(strings.ToLower(f.Path), ".flv") ||
+							strings.HasSuffix(strings.ToLower(f.Path), ".webm") {
 							hasVideo = true
 							break
 						}
