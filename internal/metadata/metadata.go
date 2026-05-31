@@ -241,7 +241,7 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 		}
 		tmdbRes = <-tmdbChan
 		if tmdbRes != nil {
-			metaCache.Store(cacheKey, tmdbRes)
+			metaCache.Set(cacheKey, tmdbRes) // Corrected from .Store to .Set
 			return tmdbRes, nil
 		}
 	case <-ctx.Done():
