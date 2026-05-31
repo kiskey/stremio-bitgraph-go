@@ -461,6 +461,7 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 				}
 			}
 			fileToPlay = largest
+			utils.Logger.Info("selected largest video file", "path", fileToPlay.Path, "size", utils.FormatSize(fileToPlay.Bytes))
 		} else {
 			largest := &selectedFiles[0]
 			for i := 1; i < len(selectedFiles); i++ {
@@ -469,6 +470,7 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 				}
 			}
 			fileToPlay = largest
+			utils.Logger.Warn("no video files found in torrent, falling back to largest file", "path", fileToPlay.Path, "size", utils.FormatSize(fileToPlay.Bytes))
 		}
 		
 		// Type assert the optional direct targeting interface (e.g. TorBox)
