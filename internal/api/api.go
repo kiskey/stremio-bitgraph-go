@@ -400,9 +400,14 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 		if targetFile == nil {
 			return "", fmt.Errorf("could not find S%sE%s in torrent", season, episode)
 		}
-		if _, ok := provider.(interface{ GetDownloadLinkForFile(context.Context, string, string) (string, error) }); ok {
-			return provider.GetDownloadLinkForFile(ctx, torrentInfo.ID, fmt.Sprintf("%d", targetFile.ID))
+		
+		// Type assert the optional direct targeting interface (e.g. TorBox)
+		if dlProvider, ok := provider.(interface {
+			GetDownloadLinkForFile(context.Context, string, string) (string, error)
+		}); ok {
+			return dlProvider.GetDownloadLinkForFile(ctx, torrentInfo.ID, fmt.Sprintf("%d", targetFile.ID))
 		}
+		
 		idx := -1
 		for i, f := range selectedFiles {
 			if f.ID == targetFile.ID {
@@ -459,9 +464,14 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 			}
 			fileToPlay = largest
 		}
-		if _, ok := provider.(interface{ GetDownloadLinkForFile(context.Context, string, string) (string, error) }); ok {
-			return provider.GetDownloadLinkForFile(ctx, torrentInfo.ID, fmt.Sprintf("%d", fileToPlay.ID))
+		
+		// Type assert the optional direct targeting interface (e.g. TorBox)
+		if dlProvider, ok := provider.(interface {
+			GetDownloadLinkForFile(context.Context, string, string) (string, error)
+		}); ok {
+			return dlProvider.GetDownloadLinkForFile(ctx, torrentInfo.ID, fmt.Sprintf("%d", fileToPlay.ID))
 		}
+		
 		idx := -1
 		for i, f := range selectedFiles {
 			if f.ID == fileToPlay.ID {
