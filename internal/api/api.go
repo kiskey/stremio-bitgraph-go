@@ -404,9 +404,17 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 				break
 			}
 		}
+		
+		// Strict Single-File Fallback: Only play the single file if it does not explicitly
+		// declare a conflicting episode number (e.g. do not play Episode 15 for an Episode 2 request).
 		if targetFile == nil && len(selectedFiles) == 1 {
-			targetFile = &selectedFiles[0]
+			singleFile := selectedFiles[0]
+			singleParsed := parser.ParseFilePath(singleFile.Path, fallbackSeason)
+			if singleParsed.Episode == 0 || singleParsed.Episode == eVal {
+				targetFile = &singleFile
+			}
 		}
+		
 		if targetFile == nil {
 			return "", fmt.Errorf("could not find S%sE%s in torrent", season, episode)
 		}
