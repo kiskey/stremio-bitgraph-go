@@ -304,7 +304,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 	return streams, cachedStreams
 }
 
-func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
 	for _, torrent := range cachedRows {
 		infoHash, _ := torrent["infohash"].(string)
 		lang, _ := torrent["language"].(string)
@@ -339,8 +339,20 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 		}
 	}
 
+	var multiFileTorrents []bitmagnet.TorrentItem
+	for _, torrent := range newTorrents {
+		if cachedHashes[torrent.InfoHash] {
+			continue
+		}
+		if torrent.Torrent.FilesStatus == "multi" && torrent.Torrent.HasFilesInfo {
+			multiFileTorrents = append(multiFileTorrents, torrent)
+		}
+	}
+
+	filesMap := fetchTorrentFilesConcurrent(ctx, multiFileTorrents)
+
 	var mu sync.Mutex
-	g, gCtx := errgroup.WithContext(context.Background())
+	g, gCtx := errgroup.WithContext(ctx)
 	
 	// Bound concurrency to hardware limits
 	g.SetLimit(runtime.NumCPU())
@@ -382,6 +394,33 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 			}
 			if !yearMatch {
 				return nil
+			}
+
+			// New Filter: If multi-file and has files list, ensure at least one video file exists
+			if td.FilesStatus == "multi" {
+				files, ok := filesMap[t.InfoHash]
+				if ok && len(files) > 0 {
+					hasVideo := false
+					for _, f := range files {
+						lowerPath := strings.ToLower(f.Path)
+						if f.FileType == "video" || 
+							strings.HasSuffix(lowerPath, ".mkv") ||
+							strings.HasSuffix(lowerPath, ".mp4") ||
+							strings.HasSuffix(lowerPath, ".avi") ||
+							strings.HasSuffix(lowerPath, ".mov") ||
+							strings.HasSuffix(lowerPath, ".wmv") ||
+							strings.HasSuffix(lowerPath, ".flv") ||
+							strings.HasSuffix(lowerPath, ".webm") {
+							hasVideo = true
+							break
+						}
+					}
+					if !hasVideo {
+						// Filter out completely (prevents unplayable .rar / .exe files from being processed)
+						utils.Logger.Warn("filtering out movie torrent: contains no playable video files", "name", td.Name, "hash", t.InfoHash)
+						return nil
+					}
+				}
 			}
 
 			bestLang := getBestLanguage(t.Languages, preferredLanguages)
