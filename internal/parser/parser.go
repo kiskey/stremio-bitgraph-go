@@ -75,11 +75,13 @@ var languageToISO = map[rtp.Language]string{
 	rtp.LanguageUzbek:         "uz",
 }
 
-var epPatternRegex = regexp.MustCompile(`(?i)\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
+// Collapses spaces and symbols between SXX and EP(XX) to force standard SXXEXX grouping
+var epPatternRegex = regexp.MustCompile(`(?i)(S\d+)?[\s\-_]*\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
+var urlRegex = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
+var bracketRegex = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
 
-// normalizeEpisodePatterns normalizes custom tracker markers like "EP(07)" or "EP 07" to "E07"
 func normalizeEpisodePatterns(s string) string {
-	return epPatternRegex.ReplaceAllString(s, "E$1")
+	return epPatternRegex.ReplaceAllString(s, "${1}E${2}")
 }
 
 func getISO(lang rtp.Language) string {
@@ -107,9 +109,16 @@ func getQuality(res int) string {
 }
 
 func SanitizeName(name string) string {
-	// Normalize custom episode representations first
-	s := normalizeEpisodePatterns(name)
+	s := name
 
+	// 1. Replace non-breaking spaces (\u00a0, \u200b) to standard spaces
+	s = strings.ReplaceAll(s, "\u00a0", " ")
+	s = strings.ReplaceAll(s, "\u200b", " ")
+
+	// 2. Normalize episode patterns (e.g. S02 EP(15) -> S02E15)
+	s = normalizeEpisodePatterns(s)
+
+	// 3. Remove non-ASCII scripts (Chinese, Cyrillic, Japanese, etc.)
 	var b strings.Builder
 	for _, r := range s {
 		if r > unicode.MaxASCII {
@@ -119,9 +128,16 @@ func SanitizeName(name string) string {
 		b.WriteRune(r)
 	}
 	s = b.String()
+
+	// 4. Remove residual URLs/domains (e.g. www.BTHDTV.com)
+	s = urlRegex.ReplaceAllString(s, " ")
+
+	// 5. Remove residual empty/garbage brackets
+	s = bracketRegex.ReplaceAllString(s, " ")
+
 	s = strings.Join(strings.Fields(s), " ")
 	
-	// Trim any leftover leading/trailing punctuation left behind by non-ASCII stripping
+	// 6. Trim leftover leading/trailing punctuation
 	s = strings.TrimLeft(s, " .-_[]()/\\")
 	s = strings.TrimRight(s, " .-_[]()/\\")
 	return s
@@ -177,7 +193,6 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 }
 
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
-	// Normalize custom episode patterns in internal file paths
 	cleanPath := normalizeEpisodePatterns(path)
 	info := rtp.ParseSeriesPath(cleanPath)
 	if info != nil && (info.SeasonNumber != 0 || len(info.EpisodeNumbers) > 0) {
@@ -204,4 +219,3 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 func IsPack(info *rtp.ParsedEpisodeInfo) bool {
 	return info != nil && (info.FullSeason || info.IsPartialSeason || info.IsMultiSeason)
 }
-
