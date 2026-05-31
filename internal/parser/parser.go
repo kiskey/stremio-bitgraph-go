@@ -1,3 +1,4 @@
+
 package parser
 
 import (
@@ -108,6 +109,10 @@ func SanitizeName(name string) string {
 	}
 	s := b.String()
 	s = strings.Join(strings.Fields(s), " ")
+	
+	// Trim any leftover leading/trailing punctuation left behind by non-ASCII stripping
+	s = strings.TrimLeft(s, " .-_[]()/\\")
+	s = strings.TrimRight(s, " .-_[]()/\\")
 	return s
 }
 
