@@ -1,3 +1,4 @@
+
 package metadata
 
 import (
@@ -7,7 +8,6 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/user/stremio-bitgraph-go/internal/config"
@@ -16,19 +16,19 @@ import (
 )
 
 var (
-	tmdbClient     = &http.Client{Timeout: 10 * time.Second}
-	cinemetaClient = &http.Client{Timeout: 10 * time.Second}
+	tmdbClient     = utils.NewOptimizedClient(8 * time.Second)
+	cinemetaClient = utils.NewOptimizedClient(8 * time.Second)
 	omdbClient     *http.Client
 	traktClient    *http.Client
-	metaCache      sync.Map
+	metaCache      = utils.NewTTLCache(12 * time.Hour)
 )
 
 func init() {
 	if config.OmdbAPIKey != "" {
-		omdbClient = &http.Client{Timeout: 10 * time.Second}
+		omdbClient = utils.NewOptimizedClient(8 * time.Second)
 	}
 	if config.TraktClientID != "" {
-		traktClient = &http.Client{Timeout: 10 * time.Second}
+		traktClient = utils.NewOptimizedClient(8 * time.Second)
 	}
 }
 
@@ -178,42 +178,67 @@ func fetchTrakt(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 
 func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 	cacheKey := imdbID + "_" + typ
-	if v, ok := metaCache.Load(cacheKey); ok {
+	if v, ok := metaCache.Get(cacheKey); ok {
 		return v.(*MetaResult), nil
 	}
 
 	utils.Logger.Info("resolving metadata", "imdb", imdbID, "type", typ)
 
-	g, ctx := errgroup.WithContext(ctx)
+	raceCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	tmdbChan := make(chan *MetaResult, 1)
+	cinemetaChan := make(chan *MetaResult, 1)
+
+	go func() {
+		res, err := fetchTmdb(raceCtx, imdbID, typ)
+		if err != nil {
+			utils.Logger.Warn("TMDB failed", "error", err)
+			tmdbChan <- nil
+			return
+		}
+		tmdbChan <- res
+	}()
+
+	go func() {
+		res, err := fetchCinemeta(raceCtx, imdbID, typ)
+		if err != nil {
+			utils.Logger.Warn("Cinemeta failed", "error", err)
+			cinemetaChan <- nil
+			return
+		}
+		cinemetaChan <- res
+	}()
+
 	var tmdbRes, cinemetaRes *MetaResult
-	var tmdbErr, cinemetaErr error
 
-	g.Go(func() error {
-		tmdbRes, tmdbErr = fetchTmdb(ctx, imdbID, typ)
-		return nil
-	})
-	g.Go(func() error {
-		cinemetaRes, cinemetaErr = fetchCinemeta(ctx, imdbID, typ)
-		return nil
-	})
-	_ = g.Wait()
-
-	if tmdbRes != nil {
-		utils.Logger.Debug("resolved via TMDB", "name", tmdbRes.Name)
-		metaCache.Store(cacheKey, tmdbRes)
-		return tmdbRes, nil
-	}
-	if tmdbErr != nil {
-		utils.Logger.Warn("TMDB failed", "error", tmdbErr)
-	}
-
-	if cinemetaRes != nil {
-		utils.Logger.Info("resolved via Cinemeta", "name", cinemetaRes.Name)
-		metaCache.Store(cacheKey, cinemetaRes)
-		return cinemetaRes, nil
-	}
-	if cinemetaErr != nil {
-		utils.Logger.Warn("Cinemeta failed", "error", cinemetaErr)
+	select {
+	case tmdbRes = <-tmdbChan:
+		if tmdbRes != nil {
+			cancel() // Abort Cinemeta connection immediately
+			utils.Logger.Debug("resolved via TMDB (early-exit)", "name", tmdbRes.Name)
+			metaCache.Set(cacheKey, tmdbRes)
+			return tmdbRes, nil
+		}
+		cinemetaRes = <-cinemetaChan
+		if cinemetaRes != nil {
+			metaCache.Set(cacheKey, cinemetaRes)
+			return cinemetaRes, nil
+		}
+	case cinemetaRes = <-cinemetaChan:
+		if cinemetaRes != nil {
+			cancel() // Abort TMDB connection immediately
+			utils.Logger.Info("resolved via Cinemeta (early-exit)", "name", cinemetaRes.Name)
+			metaCache.Set(cacheKey, cinemetaRes)
+			return cinemetaRes, nil
+		}
+		tmdbRes = <-tmdbChan
+		if tmdbRes != nil {
+			metaCache.Set(cacheKey, tmdbRes)
+			return tmdbRes, nil
+		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 
 	if omdbClient != nil || traktClient != nil {
@@ -234,11 +259,11 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 		}
 		_ = g2.Wait()
 		if omdbRes != nil {
-			metaCache.Store(cacheKey, omdbRes)
+			metaCache.Set(cacheKey, omdbRes)
 			return omdbRes, nil
 		}
 		if traktRes != nil {
-			metaCache.Store(cacheKey, traktRes)
+			metaCache.Set(cacheKey, traktRes)
 			return traktRes, nil
 		}
 	}
