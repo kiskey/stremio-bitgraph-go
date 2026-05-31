@@ -198,10 +198,6 @@ func (r *realDebridProvider) CheckCached(ctx context.Context, hashes []string) (
 	return result, nil
 }
 
-func (r *realDebridProvider) GetDownloadLinkForFile(ctx context.Context, torrentID, fileID string) (string, error) {
-	return "", fmt.Errorf("not supported for real-debrid")
-}
-
 func (r *realDebridProvider) AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error) {
 	addRes, err := r.AddMagnet(ctx, magnet)
 	if err != nil {
