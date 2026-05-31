@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -84,16 +85,21 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 	typ := chi.URLParam(r, "type")
 	id := chi.URLParam(r, "id")
 
-	utils.Logger.Info("stream request", "type", typ, "id", id)
+	idDecoded, err := url.QueryUnescape(id)
+	if err != nil {
+		idDecoded = id
+	}
+
+	utils.Logger.Info("stream request", "type", typ, "id", id, "decoded_id", idDecoded)
 
 	var imdbID, seasonStr, episodeStr string
 	if typ == "series" {
-		parts := strings.Split(id, ":")
+		parts := strings.Split(idDecoded, ":")
 		if len(parts) >= 3 {
 			imdbID, seasonStr, episodeStr = parts[0], parts[1], parts[2]
 		}
 	} else {
-		imdbID = id
+		imdbID = idDecoded
 	}
 
 	meta, err := metadata.GetMetaDetails(ctx, imdbID, typ)
