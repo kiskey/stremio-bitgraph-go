@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -67,7 +68,12 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	infoHash := chi.URLParam(r, "infoHash")
 
-	parts := strings.Split(id, ":")
+	idDecoded, err := url.QueryUnescape(id)
+	if err != nil {
+		idDecoded = id
+	}
+
+	parts := strings.Split(idDecoded, ":")
 	imdbID := parts[0]
 	var season, episode string
 	if len(parts) >= 3 {
