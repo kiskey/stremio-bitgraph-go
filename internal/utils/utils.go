@@ -1,8 +1,11 @@
+
 package utils
 
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -45,6 +48,24 @@ func SetLogLevel(level string) {
 	}
 }
 
+// NewOptimizedClient creates an HTTP client with high connection reuse & HTTP2 enabled
+func NewOptimizedClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   3 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+			ForceAttemptHTTP2:   true,
+			TLSHandshakeTimeout: 3 * time.Second,
+		},
+	}
+}
+
 func Sleep(ms int) {
 	time.Sleep(time.Duration(ms) * time.Millisecond)
 }
@@ -59,7 +80,6 @@ func FormatSize(bytes int64) string {
 
 func SanitizeName(name string) string {
 	s := name
-	
 	// Remove CJK brackets
 	re := regexp.MustCompile(`【.*?】`)
 	s = re.ReplaceAllString(s, " ")
@@ -79,7 +99,6 @@ func SanitizeName(name string) string {
 	// Remove dashes at boundaries
 	re = regexp.MustCompile(`^\s*[-–—]+\s*|\s*[-–—]+\s*$`)
 	s = re.ReplaceAllString(s, " ")
-	
 	re = regexp.MustCompile(`\s+[-–—]+\s+`)
 	s = re.ReplaceAllString(s, " ")
 
