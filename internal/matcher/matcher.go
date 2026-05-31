@@ -176,8 +176,9 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 		}
 
 		wg.Add(1)
-		go func(t bitmagnet.TorrentItem, td bitmagnet.TorrentItem_Torrent) {
+		go func(t bitmagnet.TorrentItem) {
 			defer wg.Done()
+			td := t.Torrent
 
 			sim := getTitleSimilarity(tmdbShow.Title, td.Name)
 			utils.Logger.Debug("evaluating series torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
@@ -263,7 +264,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 					}
 				}
 			}
-		}(torrent, torrentData)
+		}(torrent)
 	}
 
 	wg.Wait()
@@ -318,8 +319,9 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 		}
 
 		wg.Add(1)
-		go func(t bitmagnet.TorrentItem, td bitmagnet.TorrentItem_Torrent) {
+		go func(t bitmagnet.TorrentItem) {
 			defer wg.Done()
+			td := t.Torrent
 
 			sim := getTitleSimilarity(tmdbMovie.Title, td.Name)
 			utils.Logger.Debug("evaluating movie torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
@@ -361,7 +363,7 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 				IsCached:    false,
 			})
 			mu.Unlock()
-		}(torrent, torrentData)
+		}(torrent)
 	}
 
 	wg.Wait()
