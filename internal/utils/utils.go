@@ -80,6 +80,11 @@ func FormatSize(bytes int64) string {
 
 func SanitizeName(name string) string {
 	s := name
+
+	// Normalize special unicode spaces (e.g. \u00a0, \u200b) to standard ASCII spaces
+	s = strings.ReplaceAll(s, "\u00a0", " ")
+	s = strings.ReplaceAll(s, "\u200b", " ")
+
 	// Remove CJK brackets
 	re := regexp.MustCompile(`【.*?】`)
 	s = re.ReplaceAllString(s, " ")
