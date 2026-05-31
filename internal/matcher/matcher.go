@@ -1,4 +1,3 @@
-
 package matcher
 
 import (
@@ -61,6 +60,53 @@ func stripLeadingArticles(s string) string {
 	return s
 }
 
+func cleanWord(w string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, strings.ToLower(w))
+}
+
+func passTitleGuardrail(targetTitle, parsedTitle string) bool {
+	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
+	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
+
+	if cleanTarget == cleanParsed {
+		return true
+	}
+
+	// Remove common leading articles
+	targetNoArt := stripLeadingArticles(cleanTarget)
+	parsedNoArt := stripLeadingArticles(cleanParsed)
+	if targetNoArt == parsedNoArt {
+		return true
+	}
+
+	targetWords := strings.Fields(targetNoArt)
+	// Apply guardrail only if target title is a single word
+	if len(targetWords) == 1 {
+		singleWord := cleanWord(targetWords[0])
+		parsedWords := strings.Fields(parsedNoArt)
+
+		if len(parsedWords) > 1 {
+			hasExtraDistinctWords := false
+			for _, w := range parsedWords {
+				cw := cleanWord(w)
+				if cw != "" && cw != singleWord {
+					hasExtraDistinctWords = true
+					break
+				}
+			}
+			if hasExtraDistinctWords {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 	if tmdbTitle == "" {
 		return 0
@@ -69,7 +115,7 @@ func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 	if parsed.Title == "" {
 		return 0
 	}
-	
+
 	cleanTmdb := strings.Trim(strings.ToLower(tmdbTitle), " .-_[]()/\\")
 	cleanParsed := strings.Trim(strings.ToLower(parsed.Title), " .-_[]()/\\")
 
@@ -77,7 +123,7 @@ func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 	if jw >= config.SimilarityThreshold {
 		return jw
 	}
-	
+
 	// Fallback Normalization: strip grammatical leading articles to match titles like "The Dark Knight" with "Dark Knight"
 	cleanTmdbNoArt := stripLeadingArticles(cleanTmdb)
 	cleanParsedNoArt := stripLeadingArticles(cleanParsed)
@@ -87,7 +133,7 @@ func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 			return jwClean
 		}
 	}
-	
+
 	return jw
 }
 
@@ -167,6 +213,7 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 }
 
 func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+	// --- Build cachedStreams (unchanged logic) ---
 	for _, torrent := range cachedRows {
 		if findFileInTorrentInfo(torrent, season, episode) {
 			infoHash, _ := torrent["infohash"].(string)
@@ -215,18 +262,21 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 	filesMap := fetchTorrentFilesConcurrent(ctx, multiFileTorrents)
 
-	// Pre-generate case-insensitive matching substrings for SIMD acceleration
-	epStr := fmt.Sprintf("e%02d", episode)     // e.g. "e03"
-	epStrShort := fmt.Sprintf("e%d", episode)   // e.g. "e3"
-	epStrX := fmt.Sprintf("x%02d", episode)     // e.g. "1x03"
-	epStrXShort := fmt.Sprintf("x%d", episode)  // e.g. "1x3"
-	epNumStr := fmt.Sprintf("%02d", episode)    // e.g. "03"
-	epSingleStr := fmt.Sprintf("%d", episode)   // e.g. "3"
+	// Pre-generate episode match strings
+	epStr := fmt.Sprintf("e%02d", episode)
+	epStrShort := fmt.Sprintf("e%d", episode)
+	epStrX := fmt.Sprintf("x%02d", episode)
+	epStrXShort := fmt.Sprintf("x%d", episode)
+	epNumStr := fmt.Sprintf("%02d", episode)
+	epSingleStr := fmt.Sprintf("%d", episode)
 
-	var mu sync.Mutex
+	// Lock-free: each worker writes to its own slice, merge at end
+	type jobResult struct {
+		streams []Stream
+	}
+	results := make(chan jobResult, len(newTorrents))
+
 	g, gCtx := errgroup.WithContext(ctx)
-	
-	// Bound total concurrent workers to physical CPU cores
 	g.SetLimit(runtime.NumCPU())
 
 	for _, torrent := range newTorrents {
@@ -237,8 +287,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 		if torrentData.Name == "" {
 			continue
 		}
-
-		// Filter out compressed archives immediately to prevent downstream debrid resolution overhead
 		if isBlockedArchive(torrentData.Name) {
 			utils.Logger.Warn("filtering out series torrent: matches compressed archive pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
 			continue
@@ -270,9 +318,10 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 				quality = parsed.Quality
 			}
 
+			var local []Stream
+
 			if parsed.Season == season && parsed.Episode == episode {
-				mu.Lock()
-				streams = append(streams, Stream{
+				local = append(local, Stream{
 					InfoHash:    t.InfoHash,
 					FileIndex:   0,
 					TorrentName: td.Name,
@@ -282,7 +331,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 					Size:        td.Size,
 					IsCached:    false,
 				})
-				mu.Unlock()
+				results <- jobResult{streams: local}
 				return nil
 			}
 
@@ -292,8 +341,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 			if parsed.Season == season {
 				if td.FilesStatus == "single" {
-					mu.Lock()
-					streams = append(streams, Stream{
+					local = append(local, Stream{
 						InfoHash:    t.InfoHash,
 						FileIndex:   0,
 						TorrentName: td.Name,
@@ -303,7 +351,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 						Size:        td.Size,
 						IsCached:    false,
 					})
-					mu.Unlock()
 				} else if td.FilesStatus == "multi" {
 					files, ok := filesMap[t.InfoHash]
 					if !ok || len(files) == 0 {
@@ -321,8 +368,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 					for _, vf := range videoFiles {
 						lowerPath := strings.ToLower(vf.Path)
 
-						// VECTORIZED SIMD PRUNING:
-						// Bypass expensive regex VM if Assembly-level search confirms no episode markers
 						hasEpisode := strings.Contains(lowerPath, epStr) ||
 							strings.Contains(lowerPath, epStrShort) ||
 							strings.Contains(lowerPath, epStrX) ||
@@ -333,7 +378,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 							strings.Contains(lowerPath, "_"+epNumStr) ||
 							strings.Contains(lowerPath, "."+epNumStr)
 
-						// Critical Single-Digit Fallback: prevents false-pruning of S013, S01-3, S01_3, S01.3
 						if episode < 10 {
 							hasEpisode = hasEpisode ||
 								strings.Contains(lowerPath, "/"+epSingleStr) ||
@@ -349,8 +393,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 						fileInfo := parser.ParseFilePath(vf.Path, parsed.Season)
 						if fileInfo.Season == season && fileInfo.Episode == episode {
-							mu.Lock()
-							streams = append(streams, Stream{
+							local = append(local, Stream{
 								InfoHash:    t.InfoHash,
 								FileIndex:   vf.Index,
 								TorrentName: td.Name,
@@ -360,21 +403,33 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 								Size:        td.Size,
 								IsCached:    false,
 							})
-							mu.Unlock()
 							break
 						}
 					}
 				}
 			}
+
+			if len(local) > 0 {
+				results <- jobResult{streams: local}
+			}
 			return nil
 		})
 	}
 
-	_ = g.Wait()
+	// Close results channel when all workers finish
+	go func() {
+		_ = g.Wait()
+		close(results)
+	}()
+
+	for r := range results {
+		streams = append(streams, r.streams...)
+	}
 	return streams, cachedStreams
 }
 
 func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+	// --- Build cachedStreams (unchanged logic) ---
 	for _, torrent := range cachedRows {
 		infoHash, _ := torrent["infohash"].(string)
 		lang, _ := torrent["language"].(string)
@@ -421,10 +476,12 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 
 	filesMap := fetchTorrentFilesConcurrent(ctx, multiFileTorrents)
 
-	var mu sync.Mutex
+	type jobResult struct {
+		streams []Stream
+	}
+	results := make(chan jobResult, len(newTorrents))
+
 	g, gCtx := errgroup.WithContext(ctx)
-	
-	// Bound concurrency to hardware limits
 	g.SetLimit(runtime.NumCPU())
 
 	for _, torrent := range newTorrents {
@@ -435,8 +492,6 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 		if torrentData.Name == "" {
 			continue
 		}
-
-		// Filter out compressed archives immediately to prevent downstream debrid resolution overhead
 		if isBlockedArchive(torrentData.Name) {
 			utils.Logger.Warn("filtering out movie torrent: matches compressed archive pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
 			continue
@@ -457,14 +512,29 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			if sim < config.SimilarityThreshold {
 				return nil
 			}
-			
+
 			parsed := parser.RobustParseInfo(td.Name, 0)
+
+			// Additional Title Guardrail Check (Movie Flow Only)
+			if !passTitleGuardrail(tmdbMovie.Title, parsed.Title) {
+				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", tmdbMovie.Title, "parsed", parsed.Title)
+				return nil
+			}
+
 			yearMatch := true
 			if parsed.Year != 0 && tmdbYear != "" {
 				y, err := strconv.Atoi(tmdbYear)
 				if err == nil {
-					if parsed.Year < y-1 || parsed.Year > y+1 {
-						yearMatch = false
+					// Modern movie check (post-2020 releases) enforces 0-year tolerance
+					if y >= 2020 {
+						if parsed.Year != y {
+							yearMatch = false
+						}
+					} else {
+						// Standard fallback margin (y +- 1) for older releases
+						if parsed.Year < y-1 || parsed.Year > y+1 {
+							yearMatch = false
+						}
 					}
 				}
 			}
@@ -472,27 +542,25 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				return nil
 			}
 
-			// New Filter: If multi-file and has files list, ensure at least one video file exists
 			if td.FilesStatus == "multi" {
 				files, ok := filesMap[t.InfoHash]
 				if ok && len(files) > 0 {
 					hasVideo := false
 					for _, f := range files {
 						lowerPath := strings.ToLower(f.Path)
-						if f.FileType == "video" || 
+						if f.FileType == "video" ||
 							strings.HasSuffix(lowerPath, ".mkv") ||
 							strings.HasSuffix(lowerPath, ".mp4") ||
 							strings.HasSuffix(lowerPath, ".avi") ||
 							strings.HasSuffix(lowerPath, ".mov") ||
-							strings.HasSuffix(strings.ToLower(f.Path), ".wmv") ||
-							strings.HasSuffix(strings.ToLower(f.Path), ".flv") ||
-							strings.HasSuffix(strings.ToLower(f.Path), ".webm") {
+							strings.HasSuffix(lowerPath, ".wmv") ||
+							strings.HasSuffix(lowerPath, ".flv") ||
+							strings.HasSuffix(lowerPath, ".webm") {
 							hasVideo = true
 							break
 						}
 					}
 					if !hasVideo {
-						// Filter out completely (prevents unplayable .rar / .exe files from being processed)
 						utils.Logger.Warn("filtering out movie torrent: contains no playable video files", "name", td.Name, "hash", t.InfoHash)
 						return nil
 					}
@@ -508,8 +576,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				quality = parsed.Quality
 			}
 
-			mu.Lock()
-			streams = append(streams, Stream{
+			results <- jobResult{streams: []Stream{{
 				InfoHash:    t.InfoHash,
 				TorrentName: td.Name,
 				Seeders:     t.Seeders,
@@ -517,13 +584,19 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				Quality:     quality,
 				Size:        td.Size,
 				IsCached:    false,
-			})
-			mu.Unlock()
+			}}}
 			return nil
 		})
 	}
 
-	_ = g.Wait()
+	go func() {
+		_ = g.Wait()
+		close(results)
+	}()
+
+	for r := range results {
+		streams = append(streams, r.streams...)
+	}
 	return streams, cachedStreams
 }
 
@@ -556,8 +629,8 @@ func SortAndFilterStreams(streams, cachedStreams []Stream, preferredLanguages []
 		return 9999
 	}
 
-	// Use sort.SliceStable to guarantee 100% deterministic tie-breaks
-	sort.SliceStable(all, func(i, j int) bool {
+	// Use sort.Slice to guarantee 100% deterministic tie-breaks
+	sort.Slice(all, func(i, j int) bool {
 		a, b := all[i], all[j]
 		if a.IsCached && !b.IsCached {
 			return true

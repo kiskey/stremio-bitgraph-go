@@ -1,4 +1,3 @@
-
 package addon
 
 import (
@@ -91,6 +90,9 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 	typ := chi.URLParam(r, "type")
 	id := chi.URLParam(r, "id")
 
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	idDecoded, err := url.QueryUnescape(id)
 	if err != nil {
 		idDecoded = id
@@ -123,38 +125,66 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 	var cachedRows []map[string]interface{}
 	var searchErr error
 
-	searchCacheKey := fmt.Sprintf("%s_%s_%s", imdbID, typ, meta.Name)
+	if typ == "movie" {
+		searchCacheKey := fmt.Sprintf("%s_%s_%s", imdbID, typ, meta.Name)
+		var wg sync.WaitGroup
+		wg.Add(2)
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if cachedVal, ok := searchCache.Get(searchCacheKey); ok {
+				torrents = cachedVal.([]bitmagnet.TorrentItem)
+				return
+			}
+			torrents, searchErr = bitmagnet.SearchTorrents(ctx, meta.Name, contentType, 100)
+			if searchErr == nil && len(torrents) > 0 {
+				searchCache.Set(searchCacheKey, torrents)
+			}
+		}()
 
-	// Concurrent Bitmagnet Search + Database Caching check
-	go func() {
-		defer wg.Done()
-		if cachedVal, ok := searchCache.Get(searchCacheKey); ok {
-			torrents = cachedVal.([]bitmagnet.TorrentItem)
+		go func() {
+			defer wg.Done()
+			if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
+				rows, _ := db.Pool.Query(ctx,
+					"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
+					imdbID, typ, config.DebridProvider)
+				defer rows.Close()
+				for rows.Next() {
+					var infohash, language, quality string
+					var torrentInfoJSON []byte
+					var seeders int32
+					rows.Scan(&infohash, &torrentInfoJSON, &language, &quality, &seeders)
+					var tinfo map[string]interface{}
+					json.Unmarshal(torrentInfoJSON, &tinfo)
+					cachedRows = append(cachedRows, map[string]interface{}{
+						"infohash":          infohash,
+						"language":          language,
+						"quality":           quality,
+						"seeders":           seeders,
+						"torrent_info_json": tinfo,
+					})
+				}
+			}
+		}()
+
+		wg.Wait()
+
+		if searchErr != nil || len(torrents) == 0 {
+			json.NewEncoder(w).Encode(StreamResponse{Streams: []Stream{}})
 			return
 		}
-		torrents, searchErr = bitmagnet.SearchTorrents(ctx, meta.Name, contentType, 100)
-		if searchErr == nil && len(torrents) > 0 {
-			searchCache.Set(searchCacheKey, torrents)
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
+	} else {
+		// Series: skip initial search, only fetch DB cache
 		if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
 			rows, _ := db.Pool.Query(ctx,
-				"SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
+				"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
 				imdbID, typ, config.DebridProvider)
 			defer rows.Close()
 			for rows.Next() {
-				var id int
-				var infohash, tmdbID, ct, provider, language, quality string
+				var infohash, language, quality string
 				var torrentInfoJSON []byte
 				var seeders int32
-				var addedAt, lastUsedAt interface{}
-				rows.Scan(&id, &infohash, &tmdbID, &ct, &provider, &torrentInfoJSON, &language, &quality, &seeders, &addedAt, &lastUsedAt)
+				rows.Scan(&infohash, &torrentInfoJSON, &language, &quality, &seeders)
 				var tinfo map[string]interface{}
 				json.Unmarshal(torrentInfoJSON, &tinfo)
 				cachedRows = append(cachedRows, map[string]interface{}{
@@ -166,13 +196,6 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		}
-	}()
-
-	wg.Wait()
-
-	if searchErr != nil || len(torrents) == 0 {
-		json.NewEncoder(w).Encode(StreamResponse{Streams: []Stream{}})
-		return
 	}
 
 	var resultStreams, cachedStreams []matcher.Stream

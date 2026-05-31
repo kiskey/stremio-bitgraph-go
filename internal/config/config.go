@@ -1,4 +1,3 @@
-
 package config
 
 import (
@@ -52,7 +51,7 @@ func init() {
 
 	AddonID = "org.stremio.go.bitmagnet"
 	AddonName = "GoMagnet"
-	AddonVersion = "7.0.0"
+	AddonVersion = "7.2.0" // Incremented to track GraphQL RawMessage decoding & composite database index upgrades
 
 	RealDebridAPIKey = os.Getenv("REALDEBRID_API_KEY")
 	TmdbAPIKey = os.Getenv("TMDB_API_KEY")

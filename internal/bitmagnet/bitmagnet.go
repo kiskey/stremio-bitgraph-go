@@ -1,4 +1,3 @@
-
 package bitmagnet
 
 import (
@@ -54,33 +53,46 @@ query TorrentFiles($input: TorrentFilesQueryInput!) {
   }
 }`
 
-func queryGraphQL(ctx context.Context, query string, variables map[string]interface{}) (map[string]interface{}, error) {
+type graphQLResponse struct {
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+	Data json.RawMessage `json:"data"`
+}
+
+func queryGraphQLDirect(ctx context.Context, query string, variables map[string]interface{}, dest interface{}) error {
 	body := map[string]interface{}{"query": query, "variables": variables}
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, "POST", config.BitmagnetGQLEndpoint, bytes.NewReader(b))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
-	var data map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
+
+	var gqlResp graphQLResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gqlResp); err != nil {
+		return err
 	}
-	if errs, ok := data["errors"].([]interface{}); ok && len(errs) > 0 {
-		msgs := []string{}
-		for _, e := range errs {
-			if em, ok := e.(map[string]interface{}); ok {
-				msgs = append(msgs, fmt.Sprintf("%v", em["message"]))
-			}
+
+	if len(gqlResp.Errors) > 0 {
+		msgs := make([]string, 0, len(gqlResp.Errors))
+		for _, e := range gqlResp.Errors {
+			msgs = append(msgs, e.Message)
 		}
-		return nil, fmt.Errorf("graphql errors: %s", strings.Join(msgs, ", "))
+		return fmt.Errorf("graphql errors: %s", strings.Join(msgs, ", "))
 	}
-	return data, nil
+
+	if len(gqlResp.Data) > 0 {
+		if err := json.Unmarshal(gqlResp.Data, dest); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type TorrentItem struct {
@@ -100,13 +112,20 @@ type TorrentItem struct {
 	} `json:"torrent"`
 }
 
+type TorrentFile struct {
+	Index    int    `json:"index"`
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
+	FileType string `json:"fileType"`
+}
+
 func SearchTorrents(ctx context.Context, searchString, contentType string, limit int) ([]TorrentItem, error) {
 	cleanQuery := strings.ReplaceAll(searchString, `\`, "")
 	cleanQuery = strings.ReplaceAll(cleanQuery, `"`, "")
 	variables := map[string]interface{}{
 		"input": map[string]interface{}{
 			"queryString": cleanQuery,
-			"limit":     limit,
+			"limit":       limit,
 			"orderBy": []map[string]interface{}{
 				{"field": "published_at", "descending": true},
 				{"field": "seeders", "descending": true},
@@ -116,39 +135,23 @@ func SearchTorrents(ctx context.Context, searchString, contentType string, limit
 			},
 		},
 	}
-	data, err := queryGraphQL(ctx, torrentContentSearchQuery, variables)
+
+	type searchData struct {
+		TorrentContent struct {
+			Search struct {
+				Items []TorrentItem `json:"items"`
+			} `json:"search"`
+		} `json:"torrentContent"`
+	}
+
+	var data searchData
+	err := queryGraphQLDirect(ctx, torrentContentSearchQuery, variables, &data)
 	if err != nil {
 		utils.Logger.Error("bitmagnet search failed", "error", err)
 		return nil, err
 	}
-	var items []TorrentItem
-	tc, _ := data["data"].(map[string]interface{})
-	if tc == nil {
-		return items, nil
-	}
-	tcs, _ := tc["torrentContent"].(map[string]interface{})
-	if tcs == nil {
-		return items, nil
-	}
-	search, _ := tcs["search"].(map[string]interface{})
-	if search == nil {
-		return items, nil
-	}
-	rawItems, _ := search["items"].([]interface{})
-	for _, ri := range rawItems {
-		b, _ := json.Marshal(ri)
-		var item TorrentItem
-		json.Unmarshal(b, &item)
-		items = append(items, item)
-	}
-	return items, nil
-}
 
-type TorrentFile struct {
-	Index    int    `json:"index"`
-	Path     string `json:"path"`
-	Size     int64  `json:"size"`
-	FileType string `json:"fileType"`
+	return data.TorrentContent.Search.Items, nil
 }
 
 func GetTorrentFiles(ctx context.Context, infoHash string) ([]TorrentFile, error) {
@@ -158,29 +161,20 @@ func GetTorrentFiles(ctx context.Context, infoHash string) ([]TorrentFile, error
 			"limit":      1000,
 		},
 	}
-	data, err := queryGraphQL(ctx, torrentFilesQuery, variables)
+
+	type filesData struct {
+		Torrent struct {
+			Files struct {
+				Items []TorrentFile `json:"items"`
+			} `json:"files"`
+		} `json:"torrent"`
+	}
+
+	var data filesData
+	err := queryGraphQLDirect(ctx, torrentFilesQuery, variables, &data)
 	if err != nil {
 		return nil, err
 	}
-	var items []TorrentFile
-	tc, _ := data["data"].(map[string]interface{})
-	if tc == nil {
-		return items, nil
-	}
-	torrent, _ := tc["torrent"].(map[string]interface{})
-	if torrent == nil {
-		return items, nil
-	}
-	files, _ := torrent["files"].(map[string]interface{})
-	if files == nil {
-		return items, nil
-	}
-	rawItems, _ := files["items"].([]interface{})
-	for _, ri := range rawItems {
-		b, _ := json.Marshal(ri)
-		var item TorrentFile
-		json.Unmarshal(b, &item)
-		items = append(items, item)
-	}
-	return items, nil
+
+	return data.Torrent.Files.Items, nil
 }

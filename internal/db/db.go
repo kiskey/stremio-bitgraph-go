@@ -1,4 +1,3 @@
-
 package db
 
 import (
@@ -103,6 +102,7 @@ func InitDB(ctx context.Context) error {
 					UNIQUE (infohash, tmdb_id, content_type, provider);
 			END IF;
 		END $$;`,
+		`CREATE INDEX IF NOT EXISTS idx_torrents_search_lookup ON torrents(tmdb_id, content_type, provider);`,
 	}
 
 	for _, q := range migrations {
