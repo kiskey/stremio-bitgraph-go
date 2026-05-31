@@ -30,6 +30,17 @@ type Stream struct {
 	IsCached    bool
 }
 
+func stripLeadingArticles(s string) string {
+	s = strings.TrimSpace(s)
+	articles := []string{"the ", "a ", "an ", "le ", "la ", "les ", "l'"}
+	for _, art := range articles {
+		if strings.HasPrefix(s, art) {
+			return strings.TrimPrefix(s, art)
+		}
+	}
+	return s
+}
+
 func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 	if tmdbTitle == "" {
 		return 0
@@ -38,7 +49,26 @@ func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 	if parsed.Title == "" {
 		return 0
 	}
-	return smetrics.JaroWinkler(strings.ToLower(tmdbTitle), strings.ToLower(parsed.Title), 0.7, 4)
+	
+	cleanTmdb := strings.Trim(strings.ToLower(tmdbTitle), " .-_[]()/\\")
+	cleanParsed := strings.Trim(strings.ToLower(parsed.Title), " .-_[]()/\\")
+
+	jw := smetrics.JaroWinkler(cleanTmdb, cleanParsed, 0.7, 4)
+	if jw >= config.SimilarityThreshold {
+		return jw
+	}
+	
+	// Fallback Normalization: strip grammatical leading articles to match titles like "The Dark Knight" with "Dark Knight"
+	cleanTmdbNoArt := stripLeadingArticles(cleanTmdb)
+	cleanParsedNoArt := stripLeadingArticles(cleanParsed)
+	if cleanTmdbNoArt != cleanTmdb || cleanParsedNoArt != cleanParsed {
+		jwClean := smetrics.JaroWinkler(cleanTmdbNoArt, cleanParsedNoArt, 0.7, 4)
+		if jwClean >= config.SimilarityThreshold {
+			return jwClean
+		}
+	}
+	
+	return jw
 }
 
 func getBestLanguage(torrentLanguages []struct{ ID string }, preferredLanguages []string) string {
@@ -171,6 +201,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 	epStrX := fmt.Sprintf("x%02d", episode)     // e.g. "1x03"
 	epStrXShort := fmt.Sprintf("x%d", episode)  // e.g. "1x3"
 	epNumStr := fmt.Sprintf("%02d", episode)    // e.g. "03"
+	epSingleStr := fmt.Sprintf("%d", episode)   // e.g. "3"
 
 	var mu sync.Mutex
 	g, gCtx := errgroup.WithContext(ctx)
@@ -266,14 +297,27 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 						// VECTORIZED SIMD PRUNING:
 						// Bypass expensive regex VM if Assembly-level search confirms no episode markers
-						if !strings.Contains(lowerPath, epStr) &&
-							!strings.Contains(lowerPath, epStrShort) &&
-							!strings.Contains(lowerPath, epStrX) &&
-							!strings.Contains(lowerPath, epStrXShort) &&
-							!strings.Contains(lowerPath, "/"+epNumStr) &&
-							!strings.Contains(lowerPath, " "+epNumStr) &&
-							!strings.Contains(lowerPath, "-"+epNumStr) &&
-							!strings.Contains(lowerPath, "_"+epNumStr) {
+						hasEpisode := strings.Contains(lowerPath, epStr) ||
+							strings.Contains(lowerPath, epStrShort) ||
+							strings.Contains(lowerPath, epStrX) ||
+							strings.Contains(lowerPath, epStrXShort) ||
+							strings.Contains(lowerPath, "/"+epNumStr) ||
+							strings.Contains(lowerPath, " "+epNumStr) ||
+							strings.Contains(lowerPath, "-"+epNumStr) ||
+							strings.Contains(lowerPath, "_"+epNumStr) ||
+							strings.Contains(lowerPath, "."+epNumStr)
+
+						// Critical Single-Digit Fallback: prevents false-pruning of S013, S01-3, S01_3, S01.3
+						if episode < 10 {
+							hasEpisode = hasEpisode ||
+								strings.Contains(lowerPath, "/"+epSingleStr) ||
+								strings.Contains(lowerPath, " "+epSingleStr) ||
+								strings.Contains(lowerPath, "-"+epSingleStr) ||
+								strings.Contains(lowerPath, "_"+epSingleStr) ||
+								strings.Contains(lowerPath, "."+epSingleStr)
+						}
+
+						if !hasEpisode {
 							continue
 						}
 
