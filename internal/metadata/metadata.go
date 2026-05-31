@@ -1,4 +1,3 @@
-
 package metadata
 
 import (
@@ -22,6 +21,7 @@ var (
 	omdbClient     *http.Client
 	traktClient    *http.Client
 	metaCache      = utils.NewTTLCache(12 * time.Hour)
+	yearRegexp     = regexp.MustCompile(`\d{4}`)
 )
 
 func init() {
@@ -109,8 +109,7 @@ func fetchCinemeta(ctx context.Context, imdbID, typ string) (*MetaResult, error)
 	} else if ri, ok := meta["releaseInfo"].(string); ok {
 		yearStr = ri
 	}
-	re := regexp.MustCompile(`\d{4}`)
-	match := re.FindString(yearStr)
+	match := yearRegexp.FindString(yearStr)
 	return &MetaResult{Name: name, Year: match, Source: "Cinemeta"}, nil
 }
 
