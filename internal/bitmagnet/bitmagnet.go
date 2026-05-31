@@ -1,4 +1,3 @@
-
 package bitmagnet
 
 import (
@@ -100,13 +99,46 @@ type TorrentItem struct {
 	} `json:"torrent"`
 }
 
+type TorrentFile struct {
+	Index    int    `json:"index"`
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
+	FileType string `json:"fileType"`
+}
+
+type searchResponse struct {
+	Data struct {
+		TorrentContent struct {
+			Search struct {
+				Items []TorrentItem `json:"items"`
+			} `json:"search"`
+		} `json:"torrentContent"`
+	} `json:"data"`
+}
+
+type filesResponse struct {
+	Data struct {
+		Torrent struct {
+			Files struct {
+				Items []TorrentFile `json:"items"`
+			} `json:"files"`
+		} `json:"torrent"`
+	} `json:"data"`
+}
+
+type gqlErrorResponse struct {
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
 func SearchTorrents(ctx context.Context, searchString, contentType string, limit int) ([]TorrentItem, error) {
 	cleanQuery := strings.ReplaceAll(searchString, `\`, "")
 	cleanQuery = strings.ReplaceAll(cleanQuery, `"`, "")
 	variables := map[string]interface{}{
 		"input": map[string]interface{}{
 			"queryString": cleanQuery,
-			"limit":     limit,
+			"limit":       limit,
 			"orderBy": []map[string]interface{}{
 				{"field": "published_at", "descending": true},
 				{"field": "seeders", "descending": true},
@@ -121,34 +153,28 @@ func SearchTorrents(ctx context.Context, searchString, contentType string, limit
 		utils.Logger.Error("bitmagnet search failed", "error", err)
 		return nil, err
 	}
-	var items []TorrentItem
-	tc, _ := data["data"].(map[string]interface{})
-	if tc == nil {
-		return items, nil
-	}
-	tcs, _ := tc["torrentContent"].(map[string]interface{})
-	if tcs == nil {
-		return items, nil
-	}
-	search, _ := tcs["search"].(map[string]interface{})
-	if search == nil {
-		return items, nil
-	}
-	rawItems, _ := search["items"].([]interface{})
-	for _, ri := range rawItems {
-		b, _ := json.Marshal(ri)
-		var item TorrentItem
-		json.Unmarshal(b, &item)
-		items = append(items, item)
-	}
-	return items, nil
-}
 
-type TorrentFile struct {
-	Index    int    `json:"index"`
-	Path     string `json:"path"`
-	Size     int64  `json:"size"`
-	FileType string `json:"fileType"`
+	// Check GraphQL errors first
+	var errResp gqlErrorResponse
+	if raw, _ := json.Marshal(data); raw != nil {
+		_ = json.Unmarshal(raw, &errResp)
+	}
+	if len(errResp.Errors) > 0 {
+		msgs := make([]string, 0, len(errResp.Errors))
+		for _, e := range errResp.Errors {
+			msgs = append(msgs, e.Message)
+		}
+		return nil, fmt.Errorf("graphql errors: %s", strings.Join(msgs, ", "))
+	}
+
+	var resp searchResponse
+	if raw, _ := json.Marshal(data); raw != nil {
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			utils.Logger.Error("bitmagnet search decode failed", "error", err)
+			return nil, err
+		}
+	}
+	return resp.Data.TorrentContent.Search.Items, nil
 }
 
 func GetTorrentFiles(ctx context.Context, infoHash string) ([]TorrentFile, error) {
@@ -162,25 +188,24 @@ func GetTorrentFiles(ctx context.Context, infoHash string) ([]TorrentFile, error
 	if err != nil {
 		return nil, err
 	}
-	var items []TorrentFile
-	tc, _ := data["data"].(map[string]interface{})
-	if tc == nil {
-		return items, nil
+
+	var errResp gqlErrorResponse
+	if raw, _ := json.Marshal(data); raw != nil {
+		_ = json.Unmarshal(raw, &errResp)
 	}
-	torrent, _ := tc["torrent"].(map[string]interface{})
-	if torrent == nil {
-		return items, nil
+	if len(errResp.Errors) > 0 {
+		msgs := make([]string, 0, len(errResp.Errors))
+		for _, e := range errResp.Errors {
+			msgs = append(msgs, e.Message)
+		}
+		return nil, fmt.Errorf("graphql errors: %s", strings.Join(msgs, ", "))
 	}
-	files, _ := torrent["files"].(map[string]interface{})
-	if files == nil {
-		return items, nil
+
+	var resp filesResponse
+	if raw, _ := json.Marshal(data); raw != nil {
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return nil, err
+		}
 	}
-	rawItems, _ := files["items"].([]interface{})
-	for _, ri := range rawItems {
-		b, _ := json.Marshal(ri)
-		var item TorrentFile
-		json.Unmarshal(b, &item)
-		items = append(items, item)
-	}
-	return items, nil
+	return resp.Data.Torrent.Files.Items, nil
 }
