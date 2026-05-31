@@ -3,12 +3,12 @@ package debrid
 
 import (
 	"encoding/json"
-
 	"context"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/user/stremio-bitgraph-go/internal/config"
@@ -16,12 +16,17 @@ import (
 )
 
 type realDebridProvider struct {
-	client *http.Client
+	client       *http.Client
+	torrentCache struct {
+		mu        sync.RWMutex
+		data      []Torrent
+		fetchedAt time.Time
+	}
 }
 
 func NewRealDebrid() Provider {
 	return &realDebridProvider{
-		client: &http.Client{Timeout: 15 * time.Second},
+		client: utils.NewOptimizedClient(15 * time.Second),
 	}
 }
 
@@ -190,10 +195,48 @@ func (r *realDebridProvider) GetTorrents(ctx context.Context) ([]Torrent, error)
 	return torrents, nil
 }
 
+func (r *realDebridProvider) getCachedTorrents(ctx context.Context) ([]Torrent, error) {
+	r.torrentCache.mu.RLock()
+	if time.Since(r.torrentCache.fetchedAt) < 30*time.Second && r.torrentCache.data != nil {
+		defer r.torrentCache.mu.RUnlock()
+		return r.torrentCache.data, nil
+	}
+	r.torrentCache.mu.RUnlock()
+
+	torrents, err := r.GetTorrents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	r.torrentCache.mu.Lock()
+	r.torrentCache.data = torrents
+	r.torrentCache.fetchedAt = time.Now()
+	r.torrentCache.mu.Unlock()
+	return torrents, nil
+}
+
 func (r *realDebridProvider) CheckCached(ctx context.Context, hashes []string) (map[string]CacheStatus, error) {
 	result := make(map[string]CacheStatus)
 	for _, h := range hashes {
 		result[h] = CacheStatus{Cached: false}
+	}
+
+	torrents, err := r.getCachedTorrents(ctx)
+	if err != nil {
+		return result, nil // soft fail: mark all uncached
+	}
+
+	// Build hash lookup
+	hashMap := make(map[string]Torrent)
+	for _, t := range torrents {
+		hashMap[strings.ToLower(t.Hash)] = t
+	}
+
+	for _, h := range hashes {
+		hLower := strings.ToLower(h)
+		if t, ok := hashMap[hLower]; ok {
+			cs := CacheStatus{Cached: true, TorrentID: t.ID, Name: t.Name}
+			result[h] = cs
+		}
 	}
 	return result, nil
 }
