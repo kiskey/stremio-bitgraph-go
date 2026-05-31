@@ -1,4 +1,4 @@
---- START OF FILE stremio-bitgraph-go/internal/parser/parser.go ---
+
 package parser
 
 import (
@@ -204,4 +204,4 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 func IsPack(info *rtp.ParsedEpisodeInfo) bool {
 	return info != nil && (info.FullSeason || info.IsPartialSeason || info.IsMultiSeason)
 }
---- END OF FILE stremio-bitgraph-go/internal/parser/parser.go ---
+
