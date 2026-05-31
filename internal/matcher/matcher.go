@@ -4,6 +4,7 @@ package matcher
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -87,6 +88,7 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 	result := make(map[string][]bitmagnet.TorrentFile)
 
 	g, ctx := errgroup.WithContext(ctx)
+	// Bounded concurrent workers for local Bitmagnet I/O
 	sem := semaphore.NewWeighted(6)
 
 	for _, t := range torrents {
@@ -163,8 +165,18 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 	filesMap := fetchTorrentFilesConcurrent(ctx, multiFileTorrents)
 
+	// Pre-generate case-insensitive matching substrings for SIMD acceleration
+	epStr := fmt.Sprintf("e%02d", episode)     // e.g. "e03"
+	epStrShort := fmt.Sprintf("e%d", episode)   // e.g. "e3"
+	epStrX := fmt.Sprintf("x%02d", episode)     // e.g. "1x03"
+	epStrXShort := fmt.Sprintf("x%d", episode)  // e.g. "1x3"
+	epNumStr := fmt.Sprintf("%02d", episode)    // e.g. "03"
+
 	var mu sync.Mutex
-	var wg sync.WaitGroup
+	g, gCtx := errgroup.WithContext(ctx)
+	
+	// Bound total concurrent workers to physical CPU cores
+	g.SetLimit(runtime.NumCPU())
 
 	for _, torrent := range newTorrents {
 		if cachedHashes[torrent.InfoHash] {
@@ -175,15 +187,20 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 			continue
 		}
 
-		wg.Add(1)
-		go func(t bitmagnet.TorrentItem) {
-			defer wg.Done()
-			td := t.Torrent
+		t := torrent
+		td := torrentData
+
+		g.Go(func() error {
+			select {
+			case <-gCtx.Done():
+				return gCtx.Err()
+			default:
+			}
 
 			sim := getTitleSimilarity(tmdbShow.Title, td.Name)
 			utils.Logger.Debug("evaluating series torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
 			if sim < config.SimilarityThreshold {
-				return
+				return nil
 			}
 
 			bestLang := getBestLanguage(t.Languages, preferredLanguages)
@@ -209,11 +226,11 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 					IsCached:    false,
 				})
 				mu.Unlock()
-				return
+				return nil
 			}
 
 			if parsed.Season != 0 && parsed.Episode != 0 {
-				return
+				return nil
 			}
 
 			if parsed.Season == season {
@@ -233,7 +250,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 				} else if td.FilesStatus == "multi" {
 					files, ok := filesMap[t.InfoHash]
 					if !ok || len(files) == 0 {
-						return
+						return nil
 					}
 					var videoFiles []bitmagnet.TorrentFile
 					for _, f := range files {
@@ -242,9 +259,24 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 						}
 					}
 					if len(videoFiles) == 0 {
-						return
+						return nil
 					}
 					for _, vf := range videoFiles {
+						lowerPath := strings.ToLower(vf.Path)
+
+						// VECTORIZED SIMD PRUNING:
+						// Bypass expensive regex VM if Assembly-level search confirms no episode markers
+						if !strings.Contains(lowerPath, epStr) &&
+							!strings.Contains(lowerPath, epStrShort) &&
+							!strings.Contains(lowerPath, epStrX) &&
+							!strings.Contains(lowerPath, epStrXShort) &&
+							!strings.Contains(lowerPath, "/"+epNumStr) &&
+							!strings.Contains(lowerPath, " "+epNumStr) &&
+							!strings.Contains(lowerPath, "-"+epNumStr) &&
+							!strings.Contains(lowerPath, "_"+epNumStr) {
+							continue
+						}
+
 						fileInfo := parser.ParseFilePath(vf.Path, parsed.Season)
 						if fileInfo.Season == season && fileInfo.Episode == episode {
 							mu.Lock()
@@ -264,10 +296,11 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 					}
 				}
 			}
-		}(torrent)
+			return nil
+		})
 	}
 
-	wg.Wait()
+	_ = g.Wait()
 	return streams, cachedStreams
 }
 
@@ -307,7 +340,10 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 	}
 
 	var mu sync.Mutex
-	var wg sync.WaitGroup
+	g, gCtx := errgroup.WithContext(context.Background())
+	
+	// Bound concurrency to hardware limits
+	g.SetLimit(runtime.NumCPU())
 
 	for _, torrent := range newTorrents {
 		if cachedHashes[torrent.InfoHash] {
@@ -318,15 +354,20 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 			continue
 		}
 
-		wg.Add(1)
-		go func(t bitmagnet.TorrentItem) {
-			defer wg.Done()
-			td := t.Torrent
+		t := torrent
+		td := torrentData
+
+		g.Go(func() error {
+			select {
+			case <-gCtx.Done():
+				return gCtx.Err()
+			default:
+			}
 
 			sim := getTitleSimilarity(tmdbMovie.Title, td.Name)
 			utils.Logger.Debug("evaluating movie torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
 			if sim < config.SimilarityThreshold {
-				return
+				return nil
 			}
 			
 			parsed := parser.RobustParseInfo(td.Name, 0)
@@ -340,7 +381,7 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 				}
 			}
 			if !yearMatch {
-				return
+				return nil
 			}
 
 			bestLang := getBestLanguage(t.Languages, preferredLanguages)
@@ -363,10 +404,11 @@ func FindBestMovieStreams(tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, new
 				IsCached:    false,
 			})
 			mu.Unlock()
-		}(torrent)
+			return nil
+		})
 	}
 
-	wg.Wait()
+	_ = g.Wait()
 	return streams, cachedStreams
 }
 
@@ -399,7 +441,8 @@ func SortAndFilterStreams(streams, cachedStreams []Stream, preferredLanguages []
 		return 9999
 	}
 
-	sort.Slice(all, func(i, j int) bool {
+	// Use sort.SliceStable to guarantee 100% deterministic tie-breaks
+	sort.SliceStable(all, func(i, j int) bool {
 		a, b := all[i], all[j]
 		if a.IsCached && !b.IsCached {
 			return true
