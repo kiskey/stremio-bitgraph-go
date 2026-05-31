@@ -1,3 +1,4 @@
+
 package debrid
 
 import (
@@ -35,9 +36,6 @@ func (d *disabledProvider) CheckCached(ctx context.Context, hashes []string) (ma
 		result[h] = CacheStatus{Cached: false}
 	}
 	return result, nil
-}
-func (d *disabledProvider) GetDownloadLinkForFile(ctx context.Context, torrentID, fileID string) (string, error) {
-	return "", fmt.Errorf("debrid not configured")
 }
 func (d *disabledProvider) AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error) {
 	return nil, fmt.Errorf("debrid not configured")
