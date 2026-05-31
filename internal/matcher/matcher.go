@@ -60,6 +60,53 @@ func stripLeadingArticles(s string) string {
 	return s
 }
 
+func cleanWord(w string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, strings.ToLower(w))
+}
+
+func passTitleGuardrail(targetTitle, parsedTitle string) bool {
+	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
+	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
+
+	if cleanTarget == cleanParsed {
+		return true
+	}
+
+	// Remove common leading articles
+	targetNoArt := stripLeadingArticles(cleanTarget)
+	parsedNoArt := stripLeadingArticles(cleanParsed)
+	if targetNoArt == parsedNoArt {
+		return true
+	}
+
+	targetWords := strings.Fields(targetNoArt)
+	// Apply guardrail only if target title is a single word
+	if len(targetWords) == 1 {
+		singleWord := cleanWord(targetWords[0])
+		parsedWords := strings.Fields(parsedNoArt)
+
+		if len(parsedWords) > 1 {
+			hasExtraDistinctWords := false
+			for _, w := range parsedWords {
+				cw := cleanWord(w)
+				if cw != "" && cw != singleWord {
+					hasExtraDistinctWords = true
+					break
+				}
+			}
+			if hasExtraDistinctWords {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 	if tmdbTitle == "" {
 		return 0
@@ -467,12 +514,27 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			}
 
 			parsed := parser.RobustParseInfo(td.Name, 0)
+
+			// Additional Title Guardrail Check (Movie Flow Only)
+			if !passTitleGuardrail(tmdbMovie.Title, parsed.Title) {
+				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", tmdbMovie.Title, "parsed", parsed.Title)
+				return nil
+			}
+
 			yearMatch := true
 			if parsed.Year != 0 && tmdbYear != "" {
 				y, err := strconv.Atoi(tmdbYear)
 				if err == nil {
-					if parsed.Year < y-1 || parsed.Year > y+1 {
-						yearMatch = false
+					// Modern movie check (post-2020 releases) enforces 0-year tolerance
+					if y >= 2020 {
+						if parsed.Year != y {
+							yearMatch = false
+						}
+					} else {
+						// Standard fallback margin (y +- 1) for older releases
+						if parsed.Year < y-1 || parsed.Year > y+1 {
+							yearMatch = false
+						}
 					}
 				}
 			}
