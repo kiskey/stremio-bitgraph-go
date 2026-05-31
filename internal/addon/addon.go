@@ -234,7 +234,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		movieResult, movieCached := matcher.FindBestMovieStreams(&bitmagnet.TorrentItem{Title: meta.Name}, meta.Year, torrents, cachedRows, config.PreferredLanguages)
+		movieResult, movieCached := matcher.FindBestMovieStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, meta.Year, torrents, cachedRows, config.PreferredLanguages)
 		resultStreams = movieResult
 		cachedStreams = movieCached
 	}
