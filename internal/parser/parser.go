@@ -1,8 +1,9 @@
-
 package parser
 
 import (
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -17,6 +18,12 @@ type ParseResult struct {
 	Language string
 	Quality  string
 	IsPack   bool
+}
+
+type CandidateFile struct {
+	ID   int
+	Path string
+	Size int64
 }
 
 var languageToISO = map[rtp.Language]string{
@@ -79,6 +86,9 @@ var languageToISO = map[rtp.Language]string{
 var epPatternRegex = regexp.MustCompile(`(?i)(S\d+)?[\s\-_]*\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
 var urlRegex = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
 var bracketRegex = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
+
+var rangeRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)?\s*(\d+)\s*(?:[\-x]|to)\s*(?:e|ep|episode)?\s*(\d+)\b`)
+var seasonFolderRegex = regexp.MustCompile(`(?i)\b(?:s|season|series)\s*0*(\d+)\b`)
 
 func normalizeEpisodePatterns(s string) string {
 	return epPatternRegex.ReplaceAllString(s, "${1}E${2}")
@@ -218,4 +228,118 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 
 func IsPack(info *rtp.ParsedEpisodeInfo) bool {
 	return info != nil && (info.FullSeason || info.IsPartialSeason || info.IsMultiSeason)
+}
+
+func isExtraOrSpecial(path string) bool {
+	p := strings.ToLower(path)
+	return strings.Contains(p, "special") ||
+		strings.Contains(p, "bonus") ||
+		strings.Contains(p, "trailer") ||
+		strings.Contains(p, "featurette") ||
+		strings.Contains(p, "recap") ||
+		strings.Contains(p, "sample") ||
+		strings.Contains(p, "extra") ||
+		strings.Contains(p, "behind the scenes") ||
+		strings.Contains(p, "interview")
+}
+
+func matchRange(path string, targetEpisode int) bool {
+	matches := rangeRegex.FindAllStringSubmatch(path, -1)
+	for _, match := range matches {
+		if len(match) >= 3 {
+			start, err1 := strconv.Atoi(match[1])
+			end, err2 := strconv.Atoi(match[2])
+			if err1 == nil && err2 == nil {
+				if start <= end && targetEpisode >= start && targetEpisode <= end {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
+	var bestCandidate CandidateFile
+	var found bool
+	var maxWeight int64 = -1
+
+	// 1. Direct and Range-based Scanning with Size-weighting
+	for _, c := range candidates {
+		if isExtraOrSpecial(c.Path) {
+			continue
+		}
+
+		cleanPath := normalizeEpisodePatterns(c.Path)
+		info := ParseFilePath(cleanPath, fallbackSeason)
+
+		matched := false
+		// Check standard parsing match
+		if info.Season == targetSeason && info.Episode == targetEpisode {
+			matched = true
+		}
+
+		// Check multi-episode parsed array by releasetitleparser (if available)
+		parsedInfo := ParseFilePath(c.Path, fallbackSeason)
+		if parsedInfo.Season == targetSeason && parsedInfo.Episode == targetEpisode {
+			matched = true
+		}
+
+		// Check Range Regex (e.g. S01E21-22)
+		if !matched && info.Season == targetSeason && matchRange(c.Path, targetEpisode) {
+			matched = true
+		}
+
+		if matched {
+			// Size-weighting check to prioritize actual episodes over samples/trailers
+			if c.Size > maxWeight {
+				bestCandidate = c
+				maxWeight = c.Size
+				found = true
+			}
+		}
+	}
+
+	if found {
+		return bestCandidate, true
+	}
+
+	// 2. Index-Based Sequential Match Fallback (For absolute numbering in folder packs)
+	var seasonMatches []CandidateFile
+	for _, c := range candidates {
+		if isExtraOrSpecial(c.Path) {
+			continue
+		}
+
+		// Ensure it doesn't belong to a different season folder
+		matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
+		isDifferentSeason := false
+		for _, match := range matches {
+			if len(match) >= 2 {
+				sNum, err := strconv.Atoi(match[1])
+				if err == nil && sNum != targetSeason {
+					isDifferentSeason = true
+					break
+				}
+			}
+		}
+		if isDifferentSeason {
+			continue
+		}
+
+		seasonMatches = append(seasonMatches, c)
+	}
+
+	if len(seasonMatches) > 0 {
+		// Sort alphabetically by path to reconstruct original sequence
+		sort.Slice(seasonMatches, func(i, j int) bool {
+			return strings.Compare(strings.ToLower(seasonMatches[i].Path), strings.ToLower(seasonMatches[j].Path)) < 0
+		})
+
+		if targetEpisode > 0 && targetEpisode <= len(seasonMatches) {
+			return seasonMatches[targetEpisode-1], true
+		}
+	}
+
+	return CandidateFile{}, false
 }
