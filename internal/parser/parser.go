@@ -244,11 +244,27 @@ func isExtraOrSpecial(path string) bool {
 }
 
 func matchRange(path string, targetEpisode int) bool {
-	matches := rangeRegex.FindAllStringSubmatch(path, -1)
+	matches := rangeRegex.FindAllStringSubmatchIndex(path, -1)
 	for _, match := range matches {
-		if len(match) >= 3 {
-			start, err1 := strconv.Atoi(match[1])
-			end, err2 := strconv.Atoi(match[2])
+		if len(match) >= 6 {
+			startNumStart := match[2]
+			startNumEnd := match[3]
+			endNumStart := match[4]
+			endNumEnd := match[5]
+
+			// Skip matches that are part of decimal numbers (e.g. 13.00-14.00)
+			if startNumStart > 0 && isDecimalDot(path, startNumStart-1) {
+				continue
+			}
+			if endNumEnd < len(path) && isDecimalDot(path, endNumEnd) {
+				continue
+			}
+
+			startStr := path[startNumStart:startNumEnd]
+			endStr := path[endNumStart:endNumEnd]
+
+			start, err1 := strconv.Atoi(startStr)
+			end, err2 := strconv.Atoi(endStr)
 			if err1 == nil && err2 == nil {
 				if start <= end && targetEpisode >= start && targetEpisode <= end {
 					return true
@@ -257,6 +273,18 @@ func matchRange(path string, targetEpisode int) bool {
 		}
 	}
 	return false
+}
+
+func isDecimalDot(s string, i int) bool {
+	if i <= 0 || i >= len(s)-1 {
+		return false
+	}
+	if s[i] != '.' {
+		return false
+	}
+	left := s[i-1]
+	right := s[i+1]
+	return left >= '0' && left <= '9' && right >= '0' && right <= '9'
 }
 
 func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
