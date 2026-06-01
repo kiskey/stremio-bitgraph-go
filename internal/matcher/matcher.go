@@ -366,8 +366,13 @@ func hasNumericMismatch(target, parsed string) bool {
 	}
 
 	for _, tn := range targetNums {
+		tnInt, err1 := strconv.Atoi(tn)
+		if err1 != nil {
+			continue
+		}
 		for _, pn := range parsedNums {
-			if tn == pn {
+			pnInt, err2 := strconv.Atoi(pn)
+			if err2 == nil && tnInt == pnInt {
 				return false
 			}
 		}
