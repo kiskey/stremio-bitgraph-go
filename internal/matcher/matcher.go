@@ -8,25 +8,96 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/user/stremio-bitgraph-go/internal/bitmagnet"
 	"github.com/user/stremio-bitgraph-go/internal/config"
 	"github.com/user/stremio-bitgraph-go/internal/parser"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
-	"github.com/xrash/smetrics"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
 
-type Stream struct {
-	InfoHash    string
-	FileIndex   int
-	TorrentName string
-	Seeders     int
-	Language    string
-	Quality     string
-	Size        int64
-	IsCached    bool
+// metadataWords are technical tags that should not trigger the single-word guardrail.
+// These are common torrent metadata tokens that appear after the actual movie title.
+var metadataWords = map[string]bool{
+	"1080p": true, "720p": true, "2160p": true, "480p": true, "360p": true,
+	"4k": true, "uhd": true, "bluray": true, "bdrip": true, "brrip": true,
+	"webdl": true, "webrip": true, "hdrip": true, "dvdrip": true, "pdtv": true,
+	"hdtv": true, "cam": true, "camrip": true, "hdcam": true, "ts": true,
+	"hdts": true, "tc": true, "predvd": true, "dvdscr": true, "screener": true,
+	"scr": true, "hq": true, "v2": true, "v3": true, "hc": true, "clean": true,
+	"imax": true, "h264": true, "x264": true, "h265": true, "x265": true,
+	"hevc": true, "aac": true, "aac3": true, "dts": true, "dd51": true,
+	"truehd": true, "ac3": true, "mp3": true, "xvid": true, "divx": true,
+	"av1": true, "vp9": true, "hdr10": true, "hdr": true, "dv": true,
+	"dolby": true, "vision": true, "atmos": true, "dts-hd": true, "ma": true,
+	"dual": true, "audio": true, "dubbed": true, "dub": true, "multi": true,
+	"hindi": true, "tamil": true, "telugu": true, "malayalam": true,
+	"kannada": true, "bengali": true, "marathi": true, "punjabi": true,
+	"english": true, "spanish": true, "french": true, "italian": true,
+	"russian": true, "korean": true, "japanese": true, "chinese": true,
+	"51": true, "71": true, "20": true, "10bit": true, "remux": true,
+	"3d": true, "sdr": true, "gb": true, "mb": true, "kb": true,
+	"web": true, "dl": true, "hd": true,
+}
+
+// sequelIndicators are words that strongly suggest a different franchise entry.
+var sequelIndicators = map[string]bool{
+	"part": true, "chapter": true, "episode": true, "season": true,
+	"volume": true, "vol": true, "book": true, "returns": true,
+	"rises": true, "begins": true, "forever": true, "legacy": true,
+	"fallout": true, "crusade": true, "dynasty": true, "empire": true,
+	"revenge": true, "resurrection": true, "reloaded": true,
+	"revolutions": true, "origins": true, "awakens": true,
+	"last": true, "final": true, "next": true, "new": true,
+}
+
+// homoglyphClasses maps standard stylizations/leetspeak lookalikes to represent equivalence classes.
+var homoglyphClasses = map[rune][]rune{
+	'0': {'0', 'o'},
+	'o': {'0', 'o'},
+	'1': {'1', 'i', 'l', '!'},
+	'i': {'1', 'i', 'l', '!'},
+	'l': {'1', 'i', 'l', '!'},
+	'3': {'3', 'e'},
+	'e': {'3', 'e'},
+	'4': {'4', 'a', '@'},
+	'a': {'4', 'a', '@'},
+	'5': {'5', 's'},
+	's': {'5', 's'},
+	'7': {'7', 't', 'v', 'l'},
+	't': {'7', 't'},
+	'v': {'7', 'v'},
+	'8': {'8', 'b'},
+	'b': {'8', 'b'},
+	'9': {'9', 'g'},
+	'g': {'9', 'g'},
+}
+
+var writtenNumbers = map[string]string{
+	"one": "1", "first": "1", "1st": "1",
+	"two": "2", "second": "2", "2nd": "2",
+	"three": "3", "third": "3", "3rd": "3",
+	"four": "4", "fourth": "4", "4th": "4",
+	"five": "5", "fifth": "5", "5th": "5",
+	"six": "6", "sixth": "6", "6th": "6",
+	"seven": "7", "seventh": "7", "7th": "7",
+	"eight": "8", "eighth": "8", "8th": "8",
+	"nine": "9", "ninth": "9", "9th": "9",
+	"ten": "10", "tenth": "10", "10th": "10",
+	"eleven": "11", "eleventh": "11", "11th": "11",
+	"twelve": "12", "twelfth": "12", "12th": "12",
+}
+
+var sequelContexts = map[string]bool{
+	"part": true, "vol": true, "volume": true, "chapter": true,
+	"episode": true, "season": true, "act": true, "entry": true,
+}
+
+var ignoredNumbers = map[string]bool{
+	"1080": true, "2160": true, "720": true, "480": true, "360": true,
+	"576": true, "264": true, "265": true, "10": true, "8": true,
 }
 
 // isBlockedArchive checks if a torrent name is a compressed archive that Stremio cannot play
@@ -69,6 +140,9 @@ func cleanWord(w string) string {
 	}, strings.ToLower(w))
 }
 
+// passTitleGuardrail prevents single-word titles (e.g. "Up", "It") from matching
+// unrelated multi-word torrents (e.g. "Upgraded", "Italian"). It allows metadata
+// words (codecs, quality tags, languages) to pass through.
 func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
 	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
@@ -77,7 +151,6 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 		return true
 	}
 
-	// Remove common leading articles
 	targetNoArt := stripLeadingArticles(cleanTarget)
 	parsedNoArt := stripLeadingArticles(cleanParsed)
 	if targetNoArt == parsedNoArt {
@@ -91,20 +164,248 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 		parsedWords := strings.Fields(parsedNoArt)
 
 		if len(parsedWords) > 1 {
-			hasExtraDistinctWords := false
+			hasExtraNonMeta := false
 			for _, w := range parsedWords {
 				cw := cleanWord(w)
-				if cw != "" && cw != singleWord {
-					hasExtraDistinctWords = true
+				if cw != "" && cw != singleWord && !metadataWords[cw] {
+					hasExtraNonMeta = true
 					break
 				}
 			}
-			if hasExtraDistinctWords {
+			if hasExtraNonMeta {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+func getHomoglyphRepresentations(r rune) []rune {
+	if classes, ok := homoglyphClasses[r]; ok {
+		return classes
+	}
+	return []rune{r}
+}
+
+// OverlapCoefficient computes the overlap coefficient between two strings
+// using multi-representation homoglyph character bigrams.
+func OverlapCoefficient(s1, s2 string) float64 {
+	if s1 == s2 {
+		return 1.0
+	}
+
+	if len(s1) < 2 || len(s2) < 2 {
+		return 0.0
+	}
+
+	bg1 := make(map[string]struct{}, len(s1)*2)
+	runes1 := []rune(s1)
+	for i := 0; i < len(runes1)-1; i++ {
+		repsA := getHomoglyphRepresentations(runes1[i])
+		repsB := getHomoglyphRepresentations(runes1[i+1])
+		for _, charA := range repsA {
+			for _, charB := range repsB {
+				bg1[string(charA)+string(charB)] = struct{}{}
+			}
+		}
+	}
+
+	bg2 := make(map[string]struct{}, len(s2)*2)
+	runes2 := []rune(s2)
+	intersection := 0
+	for i := 0; i < len(runes2)-1; i++ {
+		repsA := getHomoglyphRepresentations(runes2[i])
+		repsB := getHomoglyphRepresentations(runes2[i+1])
+		for _, charA := range repsA {
+			for _, charB := range repsB {
+				bigram := string(charA) + string(charB)
+				if _, ok := bg2[bigram]; !ok {
+					bg2[bigram] = struct{}{}
+					if _, exists := bg1[bigram]; exists {
+						intersection++
+					}
+				}
+			}
+		}
+	}
+
+	if len(bg1) == 0 || len(bg2) == 0 {
+		return 0.0
+	}
+
+	minSize := len(bg1)
+	if len(bg2) < minSize {
+		minSize = len(bg2)
+	}
+
+	return float64(intersection) / float64(minSize)
+}
+
+func isRomanSequence(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r != 'i' && r != 'v' && r != 'x' && r != 'l' && r != 'c' && r != 'd' && r != 'm' {
+			return false
+		}
+	}
+	return true
+}
+
+func romanToArabic(s string) int {
+	romanMap := map[rune]int{
+		'i': 1, 'v': 5, 'x': 10, 'l': 50, 'c': 100, 'd': 500, 'm': 1000,
+	}
+	total := 0
+	lastVal := 0
+	for i := len(s) - 1; i >= 0; i-- {
+		val, ok := romanMap[rune(s[i])]
+		if !ok {
+			return 0
+		}
+		if val < lastVal {
+			total -= val
+		} else {
+			total += val
+			lastVal = val
+		}
+	}
+	return total
+}
+
+func normalizeNumbersInTitle(title string) string {
+	titleClean := strings.ReplaceAll(title, ":", " ")
+	titleClean = strings.ReplaceAll(titleClean, "-", " ")
+
+	words := strings.Fields(strings.ToLower(titleClean))
+	for i, w := range words {
+		if numDigit, ok := writtenNumbers[w]; ok {
+			words[i] = numDigit
+			continue
+		}
+
+		if isRomanSequence(w) {
+			shouldConvert := false
+			if len(w) >= 2 {
+				shouldConvert = true
+			} else if len(w) == 1 {
+				if i > 0 && sequelContexts[words[i-1]] {
+					shouldConvert = true
+				}
+				if i == len(words)-1 {
+					shouldConvert = true
+				}
+			}
+
+			if shouldConvert {
+				val := romanToArabic(w)
+				if val > 0 {
+					words[i] = strconv.Itoa(val)
+				}
+			}
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+func extractNonYearNumbers(s string) []string {
+	var nums []string
+	var current strings.Builder
+	for _, r := range s {
+		if unicode.IsDigit(r) {
+			current.WriteRune(r)
+		} else {
+			if current.Len() > 0 {
+				val := current.String()
+				if !ignoredNumbers[val] && !(len(val) == 4 && (strings.HasPrefix(val, "19") || strings.HasPrefix(val, "20"))) {
+					nums = append(nums, val)
+				}
+				current.Reset()
+			}
+		}
+	}
+	if current.Len() > 0 {
+		val := current.String()
+		if !ignoredNumbers[val] && !(len(val) == 4 && (strings.HasPrefix(val, "19") || strings.HasPrefix(val, "20"))) {
+			nums = append(nums, val)
+		}
+	}
+	return nums
+}
+
+func hasNumericMismatch(target, parsed string) bool {
+	targetNums := extractNonYearNumbers(target)
+	parsedNums := extractNonYearNumbers(parsed)
+
+	if len(targetNums) == 0 || len(parsedNums) == 0 {
+		return false
+	}
+
+	for _, tn := range targetNums {
+		for _, pn := range parsedNums {
+			if tn == pn {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func sequelGuardrail(targetTitle, parsedTitle string, score float64) float64 {
+	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
+	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
+
+	cleanTarget = normalizeNumbersInTitle(cleanTarget)
+	cleanParsed = normalizeNumbersInTitle(cleanParsed)
+
+	targetNoArt := stripLeadingArticles(cleanTarget)
+	parsedNoArt := stripLeadingArticles(cleanParsed)
+
+	shorter := len(targetNoArt)
+	longer := len(parsedNoArt)
+	if shorter > longer {
+		shorter, longer = longer, shorter
+	}
+
+	if longer == 0 || shorter == 0 {
+		return score
+	}
+
+	ratio := float64(longer) / float64(shorter)
+	if ratio <= 1.3 {
+		return score
+	}
+
+	if !strings.Contains(targetNoArt, parsedNoArt) && !strings.Contains(parsedNoArt, targetNoArt) {
+		return score
+	}
+
+	var longerStr, shorterStr string
+	if len(targetNoArt) > len(parsedNoArt) {
+		longerStr, shorterStr = targetNoArt, parsedNoArt
+	} else {
+		longerStr, shorterStr = parsedNoArt, targetNoArt
+	}
+
+	var extra string
+	if strings.HasPrefix(longerStr, shorterStr) {
+		extra = strings.TrimSpace(longerStr[len(shorterStr):])
+	} else if strings.HasSuffix(longerStr, shorterStr) {
+		extra = strings.TrimSpace(longerStr[:len(longerStr)-len(shorterStr)])
+	} else {
+		return score
+	}
+
+	extraWords := strings.Fields(extra)
+	for _, w := range extraWords {
+		cw := cleanWord(w)
+		if isRomanSequence(cw) || isNumber(cw) || sequelIndicators[cw] {
+			return score * (float64(shorter) / float64(longer))
+		}
+	}
+
+	return score
 }
 
 func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
@@ -119,22 +420,31 @@ func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 	cleanTmdb := strings.Trim(strings.ToLower(tmdbTitle), " .-_[]()/\\")
 	cleanParsed := strings.Trim(strings.ToLower(parsed.Title), " .-_[]()/\\")
 
-	jw := smetrics.JaroWinkler(cleanTmdb, cleanParsed, 0.7, 4)
-	if jw >= config.SimilarityThreshold {
-		return jw
+	cleanTmdb = normalizeNumbersInTitle(cleanTmdb)
+	cleanParsed = normalizeNumbersInTitle(cleanParsed)
+
+	if hasNumericMismatch(cleanTmdb, cleanParsed) {
+		return 0.0
 	}
 
-	// Fallback Normalization: strip grammatical leading articles to match titles like "The Dark Knight" with "Dark Knight"
+	oc := OverlapCoefficient(cleanTmdb, cleanParsed)
+
 	cleanTmdbNoArt := stripLeadingArticles(cleanTmdb)
 	cleanParsedNoArt := stripLeadingArticles(cleanParsed)
 	if cleanTmdbNoArt != cleanTmdb || cleanParsedNoArt != cleanParsed {
-		jwClean := smetrics.JaroWinkler(cleanTmdbNoArt, cleanParsedNoArt, 0.7, 4)
-		if jwClean >= config.SimilarityThreshold {
-			return jwClean
+		ocClean := OverlapCoefficient(cleanTmdbNoArt, cleanParsedNoArt)
+		if ocClean > oc {
+			oc = ocClean
 		}
 	}
 
-	return jw
+	oc = sequelGuardrail(tmdbTitle, parsed.Title, oc)
+
+	if oc >= config.SimilarityThreshold {
+		return oc
+	}
+
+	return oc
 }
 
 func getBestLanguage(torrentLanguages []struct{ ID string }, preferredLanguages []string) string {
@@ -184,7 +494,6 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 	result := make(map[string][]bitmagnet.TorrentFile)
 
 	g, ctx := errgroup.WithContext(ctx)
-	// Bounded concurrent workers for local Bitmagnet I/O
 	sem := semaphore.NewWeighted(6)
 
 	for _, t := range torrents {
@@ -213,7 +522,6 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 }
 
 func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
-	// --- Build cachedStreams (unchanged logic) ---
 	for _, torrent := range cachedRows {
 		if findFileInTorrentInfo(torrent, season, episode) {
 			infoHash, _ := torrent["infohash"].(string)
@@ -262,7 +570,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 	filesMap := fetchTorrentFilesConcurrent(ctx, multiFileTorrents)
 
-	// Pre-generate episode match strings
 	epStr := fmt.Sprintf("e%02d", episode)
 	epStrShort := fmt.Sprintf("e%d", episode)
 	epStrX := fmt.Sprintf("x%02d", episode)
@@ -270,7 +577,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 	epNumStr := fmt.Sprintf("%02d", episode)
 	epSingleStr := fmt.Sprintf("%d", episode)
 
-	// Lock-free: each worker writes to its own slice, merge at end
 	type jobResult struct {
 		streams []Stream
 	}
@@ -416,7 +722,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 		})
 	}
 
-	// Close results channel when all workers finish
 	go func() {
 		_ = g.Wait()
 		close(results)
@@ -429,7 +734,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 }
 
 func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
-	// --- Build cachedStreams (unchanged logic) ---
 	for _, torrent := range cachedRows {
 		infoHash, _ := torrent["infohash"].(string)
 		lang, _ := torrent["language"].(string)
@@ -515,7 +819,6 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 
 			parsed := parser.RobustParseInfo(td.Name, 0)
 
-			// Additional Title Guardrail Check (Movie Flow Only)
 			if !passTitleGuardrail(tmdbMovie.Title, parsed.Title) {
 				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", tmdbMovie.Title, "parsed", parsed.Title)
 				return nil
@@ -525,16 +828,9 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			if parsed.Year != 0 && tmdbYear != "" {
 				y, err := strconv.Atoi(tmdbYear)
 				if err == nil {
-					// Modern movie check (post-2020 releases) enforces 0-year tolerance
-					if y >= 2020 {
-						if parsed.Year != y {
-							yearMatch = false
-						}
-					} else {
-						// Standard fallback margin (y +- 1) for older releases
-						if parsed.Year < y-1 || parsed.Year > y+1 {
-							yearMatch = false
-						}
+					// Apply standard +/- 1 margin for all releases including post-2020 films
+					if parsed.Year < y-1 || parsed.Year > y+1 {
+						yearMatch = false
 					}
 				}
 			}
@@ -629,7 +925,6 @@ func SortAndFilterStreams(streams, cachedStreams []Stream, preferredLanguages []
 		return 9999
 	}
 
-	// Use sort.Slice to guarantee 100% deterministic tie-breaks
 	sort.Slice(all, func(i, j int) bool {
 		a, b := all[i], all[j]
 		if a.IsCached && !b.IsCached {
