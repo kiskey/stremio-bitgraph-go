@@ -644,6 +644,12 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 			if parsed.Season == season {
 				if td.FilesStatus == "single" {
+					// Guardrail: A single-file torrent can only be returned if its parsed episode
+					// matches the requested episode, or if it does not explicitly specify a different episode.
+					if parsed.Episode != 0 && parsed.Episode != episode {
+						return nil
+					}
+
 					local = append(local, Stream{
 						InfoHash:    t.InfoHash,
 						FileIndex:   0,
