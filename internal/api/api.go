@@ -383,17 +383,29 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 	if typ == "series" {
 		parsed := parser.RobustParseInfo(torrentInfo.Filename, 0)
 		fallbackSeason := parsed.Season
-		var selectedFiles []debrid.FileInfo
+		var allSelectedFiles []debrid.FileInfo
+		var selectedVideoFiles []debrid.FileInfo
 		for _, f := range torrentInfo.Files {
 			if f.Selected == 1 {
-				selectedFiles = append(selectedFiles, f)
+				allSelectedFiles = append(allSelectedFiles, f)
+				// Filter selected files to video types to prevent indexing pollution during matching fallbacks
+				lower := strings.ToLower(f.Path)
+				if strings.HasSuffix(lower, ".mkv") ||
+					strings.HasSuffix(lower, ".mp4") ||
+					strings.HasSuffix(lower, ".avi") ||
+					strings.HasSuffix(lower, ".mov") ||
+					strings.HasSuffix(lower, ".wmv") ||
+					strings.HasSuffix(lower, ".flv") ||
+					strings.HasSuffix(lower, ".webm") {
+					selectedVideoFiles = append(selectedVideoFiles, f)
+				}
 			}
 		}
 		sVal, _ := strconv.Atoi(season)
 		eVal, _ := strconv.Atoi(episode)
 
 		var candidates []parser.CandidateFile
-		for _, f := range selectedFiles {
+		for _, f := range selectedVideoFiles {
 			candidates = append(candidates, parser.CandidateFile{
 				ID:   f.ID,
 				Path: f.Path,
@@ -403,7 +415,7 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 
 		var targetFile *debrid.FileInfo
 		if bestFile, found := parser.FindBestSeriesFile(candidates, sVal, eVal, fallbackSeason); found {
-			for _, f := range selectedFiles {
+			for _, f := range selectedVideoFiles {
 				if f.ID == bestFile.ID {
 					targetFile = &f
 					break
@@ -413,8 +425,8 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 
 		// Strict Single-File Fallback: Only play the single file if it does not explicitly
 		// declare a conflicting episode number (e.g. do not play Episode 15 for an Episode 2 request).
-		if targetFile == nil && len(selectedFiles) == 1 {
-			singleFile := selectedFiles[0]
+		if targetFile == nil && len(selectedVideoFiles) == 1 {
+			singleFile := selectedVideoFiles[0]
 			singleParsed := parser.ParseFilePath(singleFile.Path, fallbackSeason)
 			if singleParsed.Episode == 0 || singleParsed.Episode == eVal {
 				targetFile = &singleFile
@@ -431,8 +443,9 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 			return dlProvider.GetDownloadLinkForFile(ctx, torrentInfo.ID, fmt.Sprintf("%d", targetFile.ID))
 		}
 
+		// Resolve index using allSelectedFiles to guarantee correct link alignment mapping on Real-Debrid
 		idx := -1
-		for i, f := range selectedFiles {
+		for i, f := range allSelectedFiles {
 			if f.ID == targetFile.ID {
 				idx = i
 				break
