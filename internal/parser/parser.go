@@ -243,6 +243,17 @@ func isExtraOrSpecial(path string) bool {
 		strings.Contains(p, "interview")
 }
 
+func isExtraOrSpecialRelaxed(path string) bool {
+	p := strings.ToLower(path)
+	return strings.Contains(p, "bonus") ||
+		strings.Contains(p, "trailer") ||
+		strings.Contains(p, "featurette") ||
+		strings.Contains(p, "recap") ||
+		strings.Contains(p, "sample") ||
+		strings.Contains(p, "behind the scenes") ||
+		strings.Contains(p, "interview")
+}
+
 func matchRange(path string, targetEpisode int) bool {
 	matches := rangeRegex.FindAllStringSubmatchIndex(path, -1)
 	for _, match := range matches {
@@ -292,9 +303,15 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	var found bool
 	var maxWeight int64 = -1
 
+	// Dynamically select target filters depending on requested season context
+	checkExtra := isExtraOrSpecial
+	if targetSeason == 0 {
+		checkExtra = isExtraOrSpecialRelaxed
+	}
+
 	// 1. Direct and Range-based Scanning with Size-weighting
 	for _, c := range candidates {
-		if isExtraOrSpecial(c.Path) {
+		if checkExtra(c.Path) {
 			continue
 		}
 
@@ -335,7 +352,7 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	// 2. Index-Based Sequential Match Fallback (For absolute numbering in folder packs)
 	var seasonMatches []CandidateFile
 	for _, c := range candidates {
-		if isExtraOrSpecial(c.Path) {
+		if checkExtra(c.Path) {
 			continue
 		}
 
@@ -365,7 +382,17 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 		})
 
 		if targetEpisode > 0 && targetEpisode <= len(seasonMatches) {
-			return seasonMatches[targetEpisode-1], true
+			candidate := seasonMatches[targetEpisode-1]
+
+			// Defensive Verification: Ensure the sequential fallback has no explicit numeric mismatch
+			candParsed := ParseFilePath(candidate.Path, fallbackSeason)
+			if candParsed.Episode != 0 && candParsed.Episode != targetEpisode {
+				// Avoid aborting on valid conjoined multi-episode ranges containing this episode
+				if !matchRange(candidate.Path, targetEpisode) {
+					return CandidateFile{}, false
+				}
+			}
+			return candidate, true
 		}
 	}
 
