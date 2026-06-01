@@ -18,6 +18,17 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+type Stream struct {
+	InfoHash    string
+	FileIndex   int
+	TorrentName string
+	Seeders     int
+	Language    string
+	Quality     string
+	Size        int64
+	IsCached    bool
+}
+
 // metadataWords are technical tags that should not trigger the single-word guardrail.
 // These are common torrent metadata tokens that appear after the actual movie title.
 var metadataWords = map[string]bool{
@@ -247,6 +258,18 @@ func isRomanSequence(s string) bool {
 	}
 	for _, r := range s {
 		if r != 'i' && r != 'v' && r != 'x' && r != 'l' && r != 'c' && r != 'd' && r != 'm' {
+			return false
+		}
+	}
+	return true
+}
+
+func isNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
 			return false
 		}
 	}
