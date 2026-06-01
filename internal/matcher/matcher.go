@@ -593,13 +593,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 	filesMap := fetchTorrentFilesConcurrent(ctx, multiFileTorrents)
 
-	epStr := fmt.Sprintf("e%02d", episode)
-	epStrShort := fmt.Sprintf("e%d", episode)
-	epStrX := fmt.Sprintf("x%02d", episode)
-	epStrXShort := fmt.Sprintf("x%d", episode)
-	epNumStr := fmt.Sprintf("%02d", episode)
-	epSingleStr := fmt.Sprintf("%d", episode)
-
 	type jobResult struct {
 		streams []Stream
 	}
@@ -649,25 +642,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 			var local []Stream
 
-			if parsed.Season == season && parsed.Episode == episode {
-				local = append(local, Stream{
-					InfoHash:    t.InfoHash,
-					FileIndex:   0,
-					TorrentName: td.Name,
-					Seeders:     t.Seeders,
-					Language:    bestLang,
-					Quality:     quality,
-					Size:        td.Size,
-					IsCached:    false,
-				})
-				results <- jobResult{streams: local}
-				return nil
-			}
-
-			if parsed.Season != 0 && parsed.Episode != 0 {
-				return nil
-			}
-
 			if parsed.Season == season {
 				if td.FilesStatus == "single" {
 					local = append(local, Stream{
@@ -685,55 +659,27 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 					if !ok || len(files) == 0 {
 						return nil
 					}
-					var videoFiles []bitmagnet.TorrentFile
+					var candidates []parser.CandidateFile
 					for _, f := range files {
 						if f.FileType == "video" {
-							videoFiles = append(videoFiles, f)
-						}
-					}
-					if len(videoFiles) == 0 {
-						return nil
-					}
-					for _, vf := range videoFiles {
-						lowerPath := strings.ToLower(vf.Path)
-
-						hasEpisode := strings.Contains(lowerPath, epStr) ||
-							strings.Contains(lowerPath, epStrShort) ||
-							strings.Contains(lowerPath, epStrX) ||
-							strings.Contains(lowerPath, epStrXShort) ||
-							strings.Contains(lowerPath, "/"+epNumStr) ||
-							strings.Contains(lowerPath, " "+epNumStr) ||
-							strings.Contains(lowerPath, "-"+epNumStr) ||
-							strings.Contains(lowerPath, "_"+epNumStr) ||
-							strings.Contains(lowerPath, "."+epNumStr)
-
-						if episode < 10 {
-							hasEpisode = hasEpisode ||
-								strings.Contains(lowerPath, "/"+epSingleStr) ||
-								strings.Contains(lowerPath, " "+epSingleStr) ||
-								strings.Contains(lowerPath, "-"+epSingleStr) ||
-								strings.Contains(lowerPath, "_"+epSingleStr) ||
-								strings.Contains(lowerPath, "."+epSingleStr)
-						}
-
-						if !hasEpisode {
-							continue
-						}
-
-						fileInfo := parser.ParseFilePath(vf.Path, parsed.Season)
-						if fileInfo.Season == season && fileInfo.Episode == episode {
-							local = append(local, Stream{
-								InfoHash:    t.InfoHash,
-								FileIndex:   vf.Index,
-								TorrentName: td.Name,
-								Seeders:     t.Seeders,
-								Language:    bestLang,
-								Quality:     quality,
-								Size:        td.Size,
-								IsCached:    false,
+							candidates = append(candidates, parser.CandidateFile{
+								ID:   f.Index,
+								Path: f.Path,
+								Size: f.Size,
 							})
-							break
 						}
+					}
+					if bestFile, found := parser.FindBestSeriesFile(candidates, season, episode, parsed.Season); found {
+						local = append(local, Stream{
+							InfoHash:    t.InfoHash,
+							FileIndex:   bestFile.ID,
+							TorrentName: td.Name,
+							Seeders:     t.Seeders,
+							Language:    bestLang,
+							Quality:     quality,
+							Size:        td.Size,
+							IsCached:    false,
+						})
 					}
 				}
 			}
