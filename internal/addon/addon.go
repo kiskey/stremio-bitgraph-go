@@ -49,6 +49,9 @@ type Stream struct {
 
 var searchCache = utils.NewTTLCache(5 * time.Minute)
 
+// Compile-time optimized replacement string structure
+var queryReplacer = strings.NewReplacer("\\", "", "\"", "")
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -86,15 +89,13 @@ func manifestHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func buildOptimizedQuery(name string, altTitles []string, suffix string) string {
-	nameClean := strings.ReplaceAll(name, `\`, "")
-	nameClean = strings.ReplaceAll(nameClean, `"`, "")
+	nameClean := queryReplacer.Replace(name)
 
 	var terms []string
 	terms = append(terms, fmt.Sprintf(`"%s"`, nameClean))
 
 	for _, alt := range altTitles {
-		altClean := strings.ReplaceAll(alt, `\`, "")
-		altClean = strings.ReplaceAll(altClean, `"`, "")
+		altClean := queryReplacer.Replace(alt)
 		if altClean != "" && altClean != nameClean {
 			terms = append(terms, fmt.Sprintf(`"%s"`, altClean))
 		}
@@ -108,8 +109,7 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 	}
 
 	if suffix != "" {
-		suffixClean := strings.ReplaceAll(suffix, `\`, "")
-		suffixClean = strings.ReplaceAll(suffixClean, `"`, "")
+		suffixClean := queryReplacer.Replace(suffix)
 		query = fmt.Sprintf("%s %s", query, suffixClean)
 	}
 
