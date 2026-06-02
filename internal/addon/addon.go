@@ -85,6 +85,37 @@ func manifestHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(m)
 }
 
+func buildOptimizedQuery(name string, altTitles []string, suffix string) string {
+	nameClean := strings.ReplaceAll(name, `\`, "")
+	nameClean = strings.ReplaceAll(nameClean, `"`, "")
+
+	var terms []string
+	terms = append(terms, fmt.Sprintf(`"%s"`, nameClean))
+
+	for _, alt := range altTitles {
+		altClean := strings.ReplaceAll(alt, `\`, "")
+		altClean = strings.ReplaceAll(altClean, `"`, "")
+		if altClean != "" && altClean != nameClean {
+			terms = append(terms, fmt.Sprintf(`"%s"`, altClean))
+		}
+	}
+
+	var query string
+	if len(terms) > 1 {
+		query = fmt.Sprintf("(%s)", strings.Join(terms, " | "))
+	} else {
+		query = terms[0]
+	}
+
+	if suffix != "" {
+		suffixClean := strings.ReplaceAll(suffix, `\`, "")
+		suffixClean = strings.ReplaceAll(suffixClean, `"`, "")
+		query = fmt.Sprintf("%s %s", query, suffixClean)
+	}
+
+	return query
+}
+
 func streamHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	typ := chi.URLParam(r, "type")
@@ -136,7 +167,8 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				torrents = cachedVal.([]bitmagnet.TorrentItem)
 				return
 			}
-			torrents, searchErr = bitmagnet.SearchTorrents(ctx, meta.Name, contentType, 100)
+			query := buildOptimizedQuery(meta.Name, meta.AltTitles, meta.Year)
+			torrents, searchErr = bitmagnet.SearchTorrents(ctx, query, contentType, 100)
 			if searchErr == nil && len(torrents) > 0 {
 				searchCache.Set(searchCacheKey, torrents)
 			}
@@ -174,7 +206,6 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// Series: skip initial search, only fetch DB cache
 		if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
 			rows, _ := db.Pool.Query(ctx,
 				"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
@@ -210,20 +241,20 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			sPadded = fmt.Sprintf("S%d", sVal)
 		}
 
-		// Parallel fetch of Refined and Broad query sets
 		var refinedTorrents, broadTorrents []bitmagnet.TorrentItem
 		g, gCtx := errgroup.WithContext(ctx)
 
 		g.Go(func() error {
-			refinedQuery := fmt.Sprintf("%s %s", meta.Name, sPadded)
+			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, sPadded)
 			var innerErr error
 			refinedTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, refinedQuery, "tv_show", 50)
 			return innerErr
 		})
 
 		g.Go(func() error {
+			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, "")
 			var innerErr error
-			broadTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, meta.Name, "tv_show", 100)
+			broadTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, broadQuery, "tv_show", 100)
 			return innerErr
 		})
 
@@ -306,7 +337,6 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fix missing fileIndex for P2P movies concurrently
 	if !provider.IsEnabled() {
 		torrentMap := make(map[string]bitmagnet.TorrentItem)
 		var multiHashes []string
