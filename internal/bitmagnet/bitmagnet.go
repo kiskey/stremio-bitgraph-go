@@ -53,14 +53,15 @@ query TorrentFiles($input: TorrentFilesQueryInput!) {
   }
 }`
 
-type graphQLResponse struct {
+// 100% Single-Pass generic GraphQL Response Envelope
+type gqlEnvelope[T any] struct {
 	Errors []struct {
 		Message string `json:"message"`
 	} `json:"errors"`
-	Data json.RawMessage `json:"data"`
+	Data T `json:"data"`
 }
 
-func queryGraphQLDirect(ctx context.Context, query string, variables map[string]interface{}, dest interface{}) error {
+func queryGraphQLGeneric[T any](ctx context.Context, query string, variables map[string]interface{}, dest *T) error {
 	body := map[string]interface{}{"query": query, "variables": variables}
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, "POST", config.BitmagnetGQLEndpoint, bytes.NewReader(b))
@@ -74,24 +75,20 @@ func queryGraphQLDirect(ctx context.Context, query string, variables map[string]
 	}
 	defer resp.Body.Close()
 
-	var gqlResp graphQLResponse
-	if err := json.NewDecoder(resp.Body).Decode(&gqlResp); err != nil {
+	var envelope gqlEnvelope[T]
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return err
 	}
 
-	if len(gqlResp.Errors) > 0 {
-		msgs := make([]string, 0, len(gqlResp.Errors))
-		for _, e := range gqlResp.Errors {
+	if len(envelope.Errors) > 0 {
+		msgs := make([]string, 0, len(envelope.Errors))
+		for _, e := range envelope.Errors {
 			msgs = append(msgs, e.Message)
 		}
 		return fmt.Errorf("graphql errors: %s", strings.Join(msgs, ", "))
 	}
 
-	if len(gqlResp.Data) > 0 {
-		if err := json.Unmarshal(gqlResp.Data, dest); err != nil {
-			return err
-		}
-	}
+	*dest = envelope.Data
 	return nil
 }
 
@@ -125,8 +122,8 @@ func SearchTorrents(ctx context.Context, searchString, contentType string, limit
 			"queryString": searchString,
 			"limit":       limit,
 			"orderBy": []map[string]interface{}{
-				{"field": "relevance", "descending": true}, // relevance sorting on hot path
-				{"field": "seeders", "descending": true},   // fallback quality sorting
+				{"field": "relevance", "descending": true}, // Sort by FTS relevance first
+				{"field": "seeders", "descending": true},   // Sort best exact matches by health
 			},
 			"facets": map[string]interface{}{
 				"contentType": map[string]interface{}{"filter": []string{contentType}},
@@ -143,7 +140,7 @@ func SearchTorrents(ctx context.Context, searchString, contentType string, limit
 	}
 
 	var data searchData
-	err := queryGraphQLDirect(ctx, torrentContentSearchQuery, variables, &data)
+	err := queryGraphQLGeneric(ctx, torrentContentSearchQuery, variables, &data)
 	if err != nil {
 		utils.Logger.Error("bitmagnet search failed", "error", err)
 		return nil, err
@@ -169,7 +166,7 @@ func GetTorrentFiles(ctx context.Context, infoHash string) ([]TorrentFile, error
 	}
 
 	var data filesData
-	err := queryGraphQLDirect(ctx, torrentFilesQuery, variables, &data)
+	err := queryGraphQLGeneric(ctx, torrentFilesQuery, variables, &data)
 	if err != nil {
 		return nil, err
 	}
