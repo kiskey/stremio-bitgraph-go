@@ -113,6 +113,15 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 		query = fmt.Sprintf("%s %s", query, suffixClean)
 	}
 
+	// Append FTS Negation Keywords dynamically on-demand
+	if len(config.NegateKeywords) > 0 {
+		var negations []string
+		for _, k := range config.NegateKeywords {
+			negations = append(negations, fmt.Sprintf("!%s", queryReplacer.Replace(k)))
+		}
+		query = fmt.Sprintf("%s %s", query, strings.Join(negations, " "))
+	}
+
 	return query
 }
 
