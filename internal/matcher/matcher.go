@@ -29,7 +29,7 @@ type Stream struct {
 	IsCached    bool
 }
 
-// Low-Entropy Grammatical Stop Words Set for PN-SILEC Filtering
+// Static Low-Entropy Stop Words Set for PN-SILEC Filtering
 var stopWords = map[string]bool{
 	"the": true, "a": true, "an": true, "and": true, "or": true,
 	"of": true, "in": true, "on": true, "at": true, "to": true,
@@ -675,14 +675,22 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 			default:
 			}
 
-			sim := getTitleSimilarity(tmdbShow.Title, td.Name)
+			// Find the title (primary or alternate) that actually matched
+			matchingTitle := ""
+			bestSim := getTitleSimilarity(tmdbShow.Title, td.Name)
+			if bestSim >= config.SimilarityThreshold {
+				matchingTitle = tmdbShow.Title
+			}
 			for _, alt := range altTitles {
-				if s := getTitleSimilarity(alt, td.Name); s > sim {
-					sim = s
+				if s := getTitleSimilarity(alt, td.Name); s > bestSim {
+					bestSim = s
+					if s >= config.SimilarityThreshold {
+						matchingTitle = alt
+					}
 				}
 			}
-			utils.Logger.Debug("evaluating series torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
-			if sim < config.SimilarityThreshold {
+
+			if bestSim < config.SimilarityThreshold || matchingTitle == "" {
 				return nil
 			}
 
@@ -697,20 +705,8 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 			}
 
 			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Series) ──
-			matchedGuardrail := false
-			if passTitleGuardrail(tmdbShow.Title, parsed.Title) {
-				matchedGuardrail = true
-			} else {
-				for _, alt := range altTitles {
-					if passTitleGuardrail(alt, parsed.Title) {
-						matchedGuardrail = true
-						break
-					}
-				}
-			}
-
-			if !matchedGuardrail {
-				utils.Logger.Debug("filtering out series torrent: failed title guardrail", "target", tmdbShow.Title, "parsed", parsed.Title)
+			if !passTitleGuardrail(matchingTitle, parsed.Title) {
+				utils.Logger.Debug("filtering out series torrent: failed title guardrail", "target", matchingTitle, "parsed", parsed.Title)
 				return nil
 			}
 
@@ -858,34 +854,30 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			default:
 			}
 
-			sim := getTitleSimilarity(tmdbMovie.Title, td.Name)
+			// Find the title (primary or alternate) that actually matched
+			matchingTitle := ""
+			bestSim := getTitleSimilarity(tmdbMovie.Title, td.Name)
+			if bestSim >= config.SimilarityThreshold {
+				matchingTitle = tmdbMovie.Title
+			}
 			for _, alt := range altTitles {
-				if s := getTitleSimilarity(alt, td.Name); s > sim {
-					sim = s
+				if s := getTitleSimilarity(alt, td.Name); s > bestSim {
+					bestSim = s
+					if s >= config.SimilarityThreshold {
+						matchingTitle = alt
+					}
 				}
 			}
-			utils.Logger.Debug("evaluating movie torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
-			if sim < config.SimilarityThreshold {
+
+			if bestSim < config.SimilarityThreshold || matchingTitle == "" {
 				return nil
 			}
 
 			parsed := parser.RobustParseInfo(td.Name, 0)
 
 			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Movie) ──
-			matchedGuardrail := false
-			if passTitleGuardrail(tmdbMovie.Title, parsed.Title) {
-				matchedGuardrail = true
-			} else {
-				for _, alt := range altTitles {
-					if passTitleGuardrail(alt, parsed.Title) {
-						matchedGuardrail = true
-						break
-					}
-				}
-			}
-
-			if !matchedGuardrail {
-				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", tmdbMovie.Title, "parsed", parsed.Title)
+			if !passTitleGuardrail(matchingTitle, parsed.Title) {
+				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", matchingTitle, "parsed", parsed.Title)
 				return nil
 			}
 
