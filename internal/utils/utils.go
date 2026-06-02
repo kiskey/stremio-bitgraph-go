@@ -55,14 +55,14 @@ func NewOptimizedClient(timeout time.Duration) *http.Client {
 		Timeout: timeout,
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
-				Timeout:   3 * time.Second,
+				Timeout:   5 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 20,
 			IdleConnTimeout:     90 * time.Second,
 			ForceAttemptHTTP2:   true,
-			TLSHandshakeTimeout: 3 * time.Second,
+			TLSHandshakeTimeout: 5 * time.Second,
 		},
 	}
 }
