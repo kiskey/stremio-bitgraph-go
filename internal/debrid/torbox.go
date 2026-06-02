@@ -1,15 +1,14 @@
-
 package debrid
 
 import (
-	"encoding/json"
-
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,7 +33,77 @@ type CacheStore interface {
 	GetByProviderID(ctx context.Context, id string) (map[string]interface{}, error)
 }
 
+// ── Low-Allocation Optimized Type-Safe API Structs ──────────────
+
+type TorboxCreateResponse struct {
+	Success bool   `json:"success"`
+	Detail  string `json:"detail"`
+	Data    struct {
+		TorrentID json.Number `json:"torrent_id"`
+		ID        json.Number `json:"id"`
+		Hash      string      `json:"hash"`
+		Name      string      `json:"name"`
+	} `json:"data"`
+}
+
+type TorboxTorrentItem struct {
+	ID            json.Number `json:"id"`
+	TorrentID     json.Number `json:"torrent_id"`
+	Hash          string      `json:"hash"`
+	Name          string      `json:"name"`
+	Status        string      `json:"status"`
+	DownloadState string      `json:"download_state"`
+	Files         []struct {
+		ID   json.Number `json:"id"`
+		Name string      `json:"name"`
+		Size int64       `json:"size"`
+	} `json:"files"`
+}
+
+type TorboxMyListResponse struct {
+	Success bool            `json:"success"`
+	Data    json.RawMessage `json:"data"`
+}
+
+type TorboxCachedItem struct {
+	ID    json.Number `json:"id"`
+	Name  string      `json:"name"`
+	Size  int64       `json:"size"`
+	Files []struct {
+		ID   json.Number `json:"id"`
+		Name string      `json:"name"`
+		Size int64       `json:"size"`
+	} `json:"files"`
+}
+
+type TorboxCheckCachedResponse struct {
+	Success bool                         `json:"success"`
+	Data    map[string]TorboxCachedItem  `json:"data"`
+}
+
+type TorboxRequestDlResponse struct {
+	Success bool            `json:"success"`
+	Data    json.RawMessage `json:"data"`
+}
+
+func getIDAsString(item map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if val, ok := item[key]; ok && val != nil {
+			if s, ok := val.(string); ok {
+				return s
+			}
+			if f, ok := val.(float64); ok {
+				return fmt.Sprintf("%.0f", f)
+			}
+		}
+	}
+	return ""
+}
+
 func NewTorbox(cache CacheStore) Provider {
+	if cache == nil {
+		cache = NewDBCache("torbox")
+	}
 	return &torboxProvider{
 		client:        utils.NewOptimizedClient(15 * time.Second),
 		cache:         cache,
@@ -187,26 +256,22 @@ func (t *torboxProvider) AddMagnet(ctx context.Context, magnet string) (*AddResu
 			lastErr = fmt.Errorf("createtorrent status %d", resp.StatusCode)
 			break
 		}
-		var data map[string]interface{}
-		if err := tbJsonDecode(resp, &data); err != nil {
+		var data TorboxCreateResponse
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 			lastErr = err
 			break
 		}
-		payload, _ := data["data"].(map[string]interface{})
-		if payload == nil {
-			payload = data
+
+		torrentID := data.Data.TorrentID.String()
+		if torrentID == "" || torrentID == "0" {
+			torrentID = data.Data.ID.String()
 		}
-		torrentID, _ := payload["torrent_id"].(string)
-		if torrentID == "" {
-			if idf, ok := payload["id"].(float64); ok {
-				torrentID = fmt.Sprintf("%.0f", idf)
-			}
-		}
-		hashRet, _ := payload["hash"].(string)
-		name, _ := payload["name"].(string)
+		hashRet := data.Data.Hash
+		name := data.Data.Name
+
 		isCached := false
-		if detail, ok := data["detail"].(string); ok {
-			isCached = strings.Contains(strings.ToLower(detail), "cached torrent")
+		if strings.Contains(strings.ToLower(data.Detail), "cached torrent") {
+			isCached = true
 		}
 		if torrentID != "" && hashRet != "" {
 			if t.cache != nil {
@@ -233,51 +298,64 @@ func (t *torboxProvider) GetTorrentInfo(ctx context.Context, id string) (*Torren
 	if resp.StatusCode == 404 {
 		return nil, ErrResourceNotFound
 	}
-	var data map[string]interface{}
-	if err := tbJsonDecode(resp, &data); err != nil {
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("gettorrentinfo status %d", resp.StatusCode)
+	}
+
+	var data TorboxMyListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
-	list, _ := data["data"].([]interface{})
-	if list == nil {
-		if d, ok := data["data"].(map[string]interface{}); ok {
-			list = []interface{}{d}
-		} else {
-			list = []interface{}{data}
+
+	var items []TorboxTorrentItem
+	dataStr := strings.TrimSpace(string(data.Data))
+	if strings.HasPrefix(dataStr, "[") {
+		json.Unmarshal(data.Data, &items)
+	} else if strings.HasPrefix(dataStr, "{") {
+		var single TorboxTorrentItem
+		if err := json.Unmarshal(data.Data, &single); err == nil {
+			items = []TorboxTorrentItem{single}
 		}
 	}
-	if len(list) == 0 {
+
+	if len(items) == 0 {
 		return nil, ErrResourceNotFound
 	}
-	item := list[0].(map[string]interface{})
-	return mapTBInfo(id, item, t.selections), nil
+	return mapTBInfo(id, items[0], t.selections), nil
 }
 
-func mapTBInfo(id string, item map[string]interface{}, selections map[string]map[int]bool) *TorrentInfo {
+func mapTBInfo(id string, item TorboxTorrentItem, selections map[string]map[int]bool) *TorrentInfo {
 	info := &TorrentInfo{ID: id}
-	info.Filename, _ = item["name"].(string)
-	rawStatus, _ := item["download_state"].(string)
+	info.Filename = item.Name
+	rawStatus := item.DownloadState
 	if rawStatus == "" {
-		rawStatus, _ = item["status"].(string)
+		rawStatus = item.Status
 	}
 	info.Status = mapTBStatus(rawStatus)
 	selectedSet := selections[id]
 	if selectedSet == nil {
 		selectedSet = make(map[int]bool)
 	}
-	if filesRaw, ok := item["files"].([]interface{}); ok {
-		for _, f := range filesRaw {
-			fm, _ := f.(map[string]interface{})
-			fidf, _ := fm["id"].(float64)
-			fid := int(fidf)
-			name, _ := fm["name"].(string)
-			size, _ := fm["size"].(float64)
-			sel := 1
-			if len(selectedSet) > 0 && !selectedSet[fid] {
-				sel = 0
+
+	for i, f := range item.Files {
+		var fid int
+		if f.ID != "" {
+			if id64, err := f.ID.Int64(); err == nil {
+				fid = int(id64)
+			} else {
+				fid, _ = strconv.Atoi(f.ID.String())
 			}
-			info.Files = append(info.Files, FileInfo{ID: fid, Path: name, Bytes: int64(size), Selected: sel})
+		} else {
+			fid = i
 		}
+
+		sel := 1
+		if len(selectedSet) > 0 && !selectedSet[fid] {
+			sel = 0
+		}
+		info.Files = append(info.Files, FileInfo{ID: fid, Path: f.Name, Bytes: f.Size, Selected: sel})
 	}
+
 	if info.Status == "downloaded" {
 		for _, f := range info.Files {
 			info.Links = append(info.Links, fmt.Sprintf("tb:%s:%d", id, f.ID))
@@ -309,28 +387,50 @@ func (t *torboxProvider) SelectFiles(ctx context.Context, id string, fileIDs []s
 		return err
 	}
 	defer resp.Body.Close()
-	var data map[string]interface{}
-	if err := tbJsonDecode(resp, &data); err != nil {
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("selectfiles status %d", resp.StatusCode)
+	}
+
+	var data TorboxMyListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return err
 	}
-	list, _ := data["data"].([]interface{})
-	if len(list) == 0 {
+
+	var items []TorboxTorrentItem
+	dataStr := strings.TrimSpace(string(data.Data))
+	if strings.HasPrefix(dataStr, "[") {
+		json.Unmarshal(data.Data, &items)
+	} else if strings.HasPrefix(dataStr, "{") {
+		var single TorboxTorrentItem
+		if err := json.Unmarshal(data.Data, &single); err == nil {
+			items = []TorboxTorrentItem{single}
+		}
+	}
+
+	if len(items) == 0 {
 		return fmt.Errorf("torrent not found")
 	}
-	item := list[0].(map[string]interface{})
-	filesRaw, _ := item["files"].([]interface{})
+
 	set := make(map[int]bool)
 	if len(fileIDs) == 1 && fileIDs[0] == "all" {
-		for _, f := range filesRaw {
-			fm, _ := f.(map[string]interface{})
-			fidf, _ := fm["id"].(float64)
-			set[int(fidf)] = true
+		for i, f := range items[0].Files {
+			var fid int
+			if f.ID != "" {
+				if id64, err := f.ID.Int64(); err == nil {
+					fid = int(id64)
+				} else {
+					fid, _ = strconv.Atoi(f.ID.String())
+				}
+			} else {
+				fid = i
+			}
+			set[fid] = true
 		}
 	} else {
 		for _, fid := range fileIDs {
-			var id int
-			fmt.Sscanf(fid, "%d", &id)
-			set[id] = true
+			var fileId int
+			fmt.Sscanf(fid, "%d", &fileId)
+			set[fileId] = true
 		}
 	}
 	t.mu.Lock()
@@ -384,25 +484,37 @@ func (t *torboxProvider) GetTorrents(ctx context.Context) ([]Torrent, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var data map[string]interface{}
-	if err := tbJsonDecode(resp, &data); err != nil {
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("gettorrents status %d", resp.StatusCode)
+	}
+
+	var data TorboxMyListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
-	list, _ := data["data"].([]interface{})
-	if list == nil {
-		return nil, nil
-	}
-	var torrents []Torrent
-	for _, item := range list {
-		m, _ := item.(map[string]interface{})
-		id, _ := m["id"].(string)
-		hash, _ := m["hash"].(string)
-		name, _ := m["name"].(string)
-		status, _ := m["status"].(string)
-		if status == "" {
-			status, _ = m["download_state"].(string)
+
+	var items []TorboxTorrentItem
+	dataStr := strings.TrimSpace(string(data.Data))
+	if strings.HasPrefix(dataStr, "[") {
+		json.Unmarshal(data.Data, &items)
+	} else if strings.HasPrefix(dataStr, "{") {
+		var single TorboxTorrentItem
+		if err := json.Unmarshal(data.Data, &single); err == nil {
+			items = []TorboxTorrentItem{single}
 		}
-		torrents = append(torrents, Torrent{ID: id, Hash: hash, Name: name, Status: status})
+	}
+
+	var torrents []Torrent
+	for _, item := range items {
+		id := item.TorrentID.String()
+		if id == "" || id == "0" {
+			id = item.ID.String()
+		}
+		status := item.Status
+		if status == "" {
+			status = item.DownloadState
+		}
+		torrents = append(torrents, Torrent{ID: id, Hash: item.Hash, Name: item.Name, Status: status})
 	}
 	return torrents, nil
 }
@@ -421,36 +533,41 @@ func (t *torboxProvider) CheckCached(ctx context.Context, hashes []string) (map[
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var data map[string]interface{}
-	if err := tbJsonDecode(resp, &data); err != nil {
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("checkcached status %d", resp.StatusCode)
+	}
+
+	var data TorboxCheckCachedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
-	payload, _ := data["data"].(map[string]interface{})
-	if payload == nil {
-		payload = data
-	}
+
 	result := make(map[string]CacheStatus)
 	for _, h := range hashes {
-		val := payload[h]
-		if vm, ok := val.(map[string]interface{}); ok && vm != nil {
+		val, ok := data.Data[h]
+		if !ok {
+			val, ok = data.Data[strings.ToLower(h)]
+		}
+		if !ok {
+			val, ok = data.Data[strings.ToUpper(h)]
+		}
+		if ok {
 			cs := CacheStatus{Cached: true}
-			if idf, ok := vm["id"].(float64); ok {
-				cs.TorrentID = fmt.Sprintf("%.0f", idf)
-			} else if ids, ok := vm["id"].(string); ok {
-				cs.TorrentID = ids
-			}
-			cs.Name, _ = vm["name"].(string)
-			if sz, ok := vm["size"].(float64); ok {
-				cs.Size = int64(sz)
-			}
-			if filesRaw, ok := vm["files"].([]interface{}); ok {
-				for _, f := range filesRaw {
-					fm, _ := f.(map[string]interface{})
-					fidf, _ := fm["id"].(float64)
-					fname, _ := fm["name"].(string)
-					fsize, _ := fm["size"].(float64)
-					cs.Files = append(cs.Files, CacheFile{ID: int(fidf), Name: fname, Size: int64(fsize)})
+			cs.TorrentID = val.ID.String()
+			cs.Name = val.Name
+			cs.Size = val.Size
+			for i, f := range val.Files {
+				var fid int
+				if f.ID != "" {
+					if id64, err := f.ID.Int64(); err == nil {
+						fid = int(id64)
+					} else {
+						fid, _ = strconv.Atoi(f.ID.String())
+					}
+				} else {
+					fid = i
 				}
+				cs.Files = append(cs.Files, CacheFile{ID: fid, Name: f.Name, Size: f.Size})
 			}
 			result[h] = cs
 		} else {
@@ -470,16 +587,30 @@ func (t *torboxProvider) GetDownloadLinkForFile(ctx context.Context, torrentID, 
 		return "", err
 	}
 	defer resp.Body.Close()
-	var data map[string]interface{}
-	if err := tbJsonDecode(resp, &data); err != nil {
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("requestdl status %d", resp.StatusCode)
+	}
+
+	var data TorboxRequestDlResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return "", err
 	}
-	payload, _ := data["data"].(map[string]interface{})
-	if payload == nil {
-		payload = data
+
+	var link string
+	dataStr := strings.TrimSpace(string(data.Data))
+	if strings.HasPrefix(dataStr, "\"") {
+		json.Unmarshal(data.Data, &link)
+	} else {
+		var obj struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(data.Data, &obj); err == nil {
+			link = obj.URL
+		}
 	}
-	if u, ok := payload["url"].(string); ok {
-		return u, nil
+
+	if link != "" {
+		return link, nil
 	}
 	return "", fmt.Errorf("no download url")
 }
