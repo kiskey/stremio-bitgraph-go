@@ -22,6 +22,7 @@ type torboxProvider struct {
 	cache         CacheStore
 	selections    map[string]map[int]bool
 	recentAdds    map[string]time.Time
+	recentIDs     map[string]string
 	addTimestamps []time.Time
 	mu            sync.Mutex
 }
@@ -101,14 +102,16 @@ func getIDAsString(item map[string]interface{}, keys ...string) string {
 }
 
 func NewTorbox(cache CacheStore) Provider {
-	if cache == nil {
-		cache = NewDBCache("torbox")
-	}
+	// Dynamically expire shared memory caches for TorBox to enforce strict on-demand play redirects
+	URLCache.ttl = 1 * time.Second
+	TorrentInfoCache.ttl = 5 * time.Second
+
 	return &torboxProvider{
 		client:        utils.NewOptimizedClient(15 * time.Second),
-		cache:         cache,
+		cache:         nil, // explicitly ignore and bypass local persistent DB caching for TorBox
 		selections:    make(map[string]map[int]bool),
 		recentAdds:    make(map[string]time.Time),
+		recentIDs:     make(map[string]string),
 		addTimestamps: []time.Time{},
 	}
 }
@@ -144,6 +147,15 @@ func extractInfoHash(magnet string) string {
 }
 
 func (t *torboxProvider) checkRateLimit() bool {
+	t.mu.Lock()
+	for _, ts := range t.addTimestamps {
+		if ts.After(time.Now().Add(-60 * time.Second)) {
+			t.addTimestamps = append(t.addTimestamps, ts)
+		}
+	}
+	t.addTimestamps = t.addTimestamps[:0]
+	t.mu.Unlock()
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
@@ -203,19 +215,11 @@ func (t *torboxProvider) AddMagnet(ctx context.Context, magnet string) (*AddResu
 	}
 
 	t.mu.Lock()
-	if ts, ok := t.recentAdds[hash]; ok && time.Since(ts) < 30*time.Second {
+	if id, ok := t.recentIDs[hash]; ok && id != "" {
 		t.mu.Unlock()
-		if t.cache != nil {
-			if cached, _ := t.cache.Get(ctx, hash); cached != nil {
-				if pid, ok := cached["provider_torrent_id"].(string); ok && pid != "" {
-					return &AddResult{ID: pid, Hash: hash, Cached: true}, nil
-				}
-			}
-		}
-	} else {
-		t.recentAdds[hash] = time.Now()
-		t.mu.Unlock()
+		return &AddResult{ID: id, Hash: hash, Cached: true}, nil
 	}
+	t.mu.Unlock()
 
 	if !t.checkRateLimit() {
 		return nil, fmt.Errorf("torbox addMagnet rate limit exceeded")
@@ -224,18 +228,6 @@ func (t *torboxProvider) AddMagnet(ctx context.Context, magnet string) (*AddResu
 	if config.TorboxMaxActiveTorrents > 0 {
 		if err := t.cleanupStaleActiveTorrents(ctx, config.TorboxMaxActiveTorrents); err != nil {
 			utils.Logger.Warn("torbox cleanup failed", "error", err)
-		}
-	}
-
-	if t.cache != nil {
-		cached, _ := t.cache.Get(ctx, hash)
-		if cached != nil {
-			if pid, ok := cached["provider_torrent_id"].(string); ok && pid != "" {
-				info, err := t.GetTorrentInfo(ctx, pid)
-				if err == nil && info != nil {
-					return &AddResult{ID: pid, Hash: hash, Cached: true}, nil
-				}
-			}
 		}
 	}
 
@@ -274,13 +266,10 @@ func (t *torboxProvider) AddMagnet(ctx context.Context, magnet string) (*AddResu
 			isCached = true
 		}
 		if torrentID != "" && hashRet != "" {
-			if t.cache != nil {
-				t.cache.Set(ctx, hash, map[string]interface{}{
-					"provider_torrent_id": torrentID,
-					"status":              "active",
-					"extra":               map[string]interface{}{},
-				})
-			}
+			t.mu.Lock()
+			t.recentIDs[hash] = torrentID
+			t.recentIDs[strings.ToLower(hashRet)] = torrentID
+			t.mu.Unlock()
 			return &AddResult{ID: torrentID, Hash: hashRet, Name: name, Cached: isCached}, nil
 		}
 		lastErr = fmt.Errorf("addMagnet response missing id/hash")
@@ -467,14 +456,16 @@ func (t *torboxProvider) DeleteTorrent(ctx context.Context, id string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if t.cache != nil {
-		row, _ := t.cache.GetByProviderID(ctx, id)
-		if row != nil {
-			if hash, ok := row["hash"].(string); ok {
-				t.cache.Update(ctx, hash, map[string]interface{}{"status": "deleted"})
-			}
+
+	t.mu.Lock()
+	for h, rid := range t.recentIDs {
+		if rid == id {
+			delete(t.recentIDs, h)
 		}
 	}
+	delete(t.selections, id)
+	t.mu.Unlock()
+
 	return nil
 }
 
@@ -569,6 +560,13 @@ func (t *torboxProvider) CheckCached(ctx context.Context, hashes []string) (map[
 				}
 				cs.Files = append(cs.Files, CacheFile{ID: fid, Name: f.Name, Size: f.Size})
 			}
+
+			if cs.TorrentID != "" {
+				t.mu.Lock()
+				t.recentIDs[strings.ToLower(h)] = cs.TorrentID
+				t.mu.Unlock()
+			}
+
 			result[h] = cs
 		} else {
 			result[h] = CacheStatus{Cached: false}
@@ -599,14 +597,35 @@ func (t *torboxProvider) GetDownloadLinkForFile(ctx context.Context, torrentID, 
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+config.TorboxAPIKey)
 	resp, err := t.client.Do(req)
-	if err != nil {
-		utils.Logger.Error("torbox GetDownloadLinkForFile failed", "error", err)
-		return "", err
+
+	if err != nil || (resp != nil && resp.StatusCode != 200) {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		utils.Logger.Warn("torbox download link request failed, attempting self-healing", "torrent_id", torrentID, "file_id", fileID)
+
+		var infoHash string
+		t.mu.Lock()
+		for h, rid := range t.recentIDs {
+			if rid == torrentID {
+				infoHash = h
+				break
+			}
+		}
+		t.mu.Unlock()
+
+		if infoHash != "" {
+			utils.Logger.Info("self-healing: re-adding expired/deleted torrent", "hash", infoHash)
+			magnet := fmt.Sprintf("magnet:?xt=urn:btih:%s", infoHash)
+			newInfo, err := t.AddAndSelect(ctx, magnet)
+			if err == nil && newInfo != nil && newInfo.ID != torrentID {
+				utils.Logger.Info("self-healing successful, retrying requestdl with new torrent ID", "new_id", newInfo.ID)
+				return t.GetDownloadLinkForFile(ctx, newInfo.ID, fileID)
+			}
+		}
+		return "", fmt.Errorf("requestdl failed and self-healing could not recover")
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("requestdl status %d", resp.StatusCode)
-	}
 
 	var data TorboxRequestDlResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
