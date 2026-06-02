@@ -29,6 +29,14 @@ type Stream struct {
 	IsCached    bool
 }
 
+// Low-Entropy Grammatical Stop Words Set for PN-SILEC Filtering
+var stopWords = map[string]bool{
+	"the": true, "a": true, "an": true, "and": true, "or": true,
+	"of": true, "in": true, "on": true, "at": true, "to": true,
+	"for": true, "with": true, "by": true, "from": true, "aka": true,
+	"la": true, "le": true, "les": true, "el": true, "un": true, "une": true,
+}
+
 // metadataWords are technical tags that should not trigger the single-word guardrail.
 // These are common torrent metadata tokens that appear after the actual movie title.
 var metadataWords = map[string]bool{
@@ -169,15 +177,45 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 	}
 
 	targetWords := strings.Fields(targetNoArt)
-	// Apply guardrail only if target title is a single word
+	parsedWords := strings.Fields(parsedNoArt)
+
+	// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail ──
+	if len(targetWords) > 1 && len(parsedWords) > len(targetWords) {
+		// Verify if the parsed title starts with the target phrase
+		startsSame := true
+		for i := 0; i < len(targetWords); i++ {
+			if cleanWord(parsedWords[i]) != cleanWord(targetWords[i]) {
+				startsSame = false
+				break
+			}
+		}
+
+		if startsSame {
+			// Extract the extra trailing tokens (P \ T)
+			extraWords := parsedWords[len(targetWords):]
+			hasSubstantiveProperNoun := false
+			for _, w := range extraWords {
+				cw := cleanWord(w)
+				if cw == "" {
+					continue
+				}
+				// If the extra word is NOT a stop word and NOT a technical metadata word,
+				// we flag it as an unauthorizedProperNoun (indicating a different show entity).
+				if !stopWords[cw] && !metadataWords[cw] {
+					hasSubstantiveProperNoun = true
+					break
+				}
+			}
+			if hasSubstantiveProperNoun {
+				return false // ❌ REJECTED (Substantive Proper-Noun Detected)
+			}
+		}
+	}
+
+	// ── Standard Single-Word Title Guardrail (Preserved & Fine-Tuned) ──
 	if len(targetWords) == 1 {
 		singleWord := cleanWord(targetWords[0])
-		parsedWords := strings.Fields(parsedNoArt)
-
 		if len(parsedWords) > 1 {
-			// If the first word of the parsed title exactly matches our target single word,
-			// it means this is a valid extended/localized title (e.g. "Swapped - Al tuo posto")
-			// rather than an unrelated word starting with the same letters (e.g. "Upgraded").
 			firstWord := cleanWord(parsedWords[0])
 			if firstWord == singleWord {
 				return true
@@ -186,13 +224,13 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 			hasExtraNonMeta := false
 			for _, w := range parsedWords {
 				cw := cleanWord(w)
-				if cw != "" && cw != singleWord && !metadataWords[cw] {
+				if cw != "" && cw != singleWord && !metadataWords[cw] && !stopWords[cw] {
 					hasExtraNonMeta = true
 					break
 				}
 			}
 			if hasExtraNonMeta {
-				return false
+				return false // ❌ REJECTED
 			}
 		}
 	}
@@ -658,6 +696,24 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 				quality = parsed.Quality
 			}
 
+			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Series) ──
+			matchedGuardrail := false
+			if passTitleGuardrail(tmdbShow.Title, parsed.Title) {
+				matchedGuardrail = true
+			} else {
+				for _, alt := range altTitles {
+					if passTitleGuardrail(alt, parsed.Title) {
+						matchedGuardrail = true
+						break
+					}
+				}
+			}
+
+			if !matchedGuardrail {
+				utils.Logger.Debug("filtering out series torrent: failed title guardrail", "target", tmdbShow.Title, "parsed", parsed.Title)
+				return nil
+			}
+
 			var local []Stream
 
 			if parsed.Season == season {
@@ -815,6 +871,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 
 			parsed := parser.RobustParseInfo(td.Name, 0)
 
+			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Movie) ──
 			matchedGuardrail := false
 			if passTitleGuardrail(tmdbMovie.Title, parsed.Title) {
 				matchedGuardrail = true
