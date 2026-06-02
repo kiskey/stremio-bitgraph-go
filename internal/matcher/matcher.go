@@ -175,6 +175,14 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 		parsedWords := strings.Fields(parsedNoArt)
 
 		if len(parsedWords) > 1 {
+			// If the first word of the parsed title exactly matches our target single word,
+			// it means this is a valid extended/localized title (e.g. "Swapped - Al tuo posto")
+			// rather than an unrelated word starting with the same letters (e.g. "Upgraded").
+			firstWord := cleanWord(parsedWords[0])
+			if firstWord == singleWord {
+				return true
+			}
+
 			hasExtraNonMeta := false
 			for _, w := range parsedWords {
 				cw := cleanWord(w)
@@ -549,7 +557,7 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 	return result
 }
 
-func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, altTitles []string, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
 	for _, torrent := range cachedRows {
 		if findFileInTorrentInfo(torrent, season, episode) {
 			infoHash, _ := torrent["infohash"].(string)
@@ -630,6 +638,11 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 			}
 
 			sim := getTitleSimilarity(tmdbShow.Title, td.Name)
+			for _, alt := range altTitles {
+				if s := getTitleSimilarity(alt, td.Name); s > sim {
+					sim = s
+				}
+			}
 			utils.Logger.Debug("evaluating series torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
 			if sim < config.SimilarityThreshold {
 				return nil
@@ -649,8 +662,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 			if parsed.Season == season {
 				if td.FilesStatus == "single" {
-					// Guardrail: A single-file torrent can only be returned if its parsed episode
-					// matches the requested episode, or if it does not explicitly specify a different episode.
 					if parsed.Episode != 0 && parsed.Episode != episode {
 						return nil
 					}
@@ -713,7 +724,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 	return streams, cachedStreams
 }
 
-func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, altTitles []string, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
 	for _, torrent := range cachedRows {
 		infoHash, _ := torrent["infohash"].(string)
 		lang, _ := torrent["language"].(string)
@@ -792,6 +803,11 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			}
 
 			sim := getTitleSimilarity(tmdbMovie.Title, td.Name)
+			for _, alt := range altTitles {
+				if s := getTitleSimilarity(alt, td.Name); s > sim {
+					sim = s
+				}
+			}
 			utils.Logger.Debug("evaluating movie torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
 			if sim < config.SimilarityThreshold {
 				return nil
@@ -799,7 +815,19 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 
 			parsed := parser.RobustParseInfo(td.Name, 0)
 
-			if !passTitleGuardrail(tmdbMovie.Title, parsed.Title) {
+			matchedGuardrail := false
+			if passTitleGuardrail(tmdbMovie.Title, parsed.Title) {
+				matchedGuardrail = true
+			} else {
+				for _, alt := range altTitles {
+					if passTitleGuardrail(alt, parsed.Title) {
+						matchedGuardrail = true
+						break
+					}
+				}
+			}
+
+			if !matchedGuardrail {
 				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", tmdbMovie.Title, "parsed", parsed.Title)
 				return nil
 			}
@@ -808,7 +836,6 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			if parsed.Year != 0 && tmdbYear != "" {
 				y, err := strconv.Atoi(tmdbYear)
 				if err == nil {
-					// Apply standard +/- 1 margin for all releases including post-2020 films
 					if parsed.Year < y-1 || parsed.Year > y+1 {
 						yearMatch = false
 					}
