@@ -578,6 +578,23 @@ func (t *torboxProvider) CheckCached(ctx context.Context, hashes []string) (map[
 }
 
 func (t *torboxProvider) GetDownloadLinkForFile(ctx context.Context, torrentID, fileID string) (string, error) {
+	// Retrieve exact filename for our structured playback INFO logging
+	fileName := "unknown"
+	if info, err := t.GetTorrentInfo(ctx, torrentID); err == nil && info != nil {
+		var targetFID int
+		if fIDInt, err := strconv.Atoi(fileID); err == nil {
+			targetFID = fIDInt
+		}
+		for _, f := range info.Files {
+			if f.ID == targetFID {
+				fileName = f.Path
+				break
+			}
+		}
+	}
+
+	utils.Logger.Info("torbox request download link", "torrent_id", torrentID, "file_id", fileID, "file_name", fileName)
+
 	url := fmt.Sprintf("https://api.torbox.app/v1/api/torrents/requestdl?token=%s&torrent_id=%s&file_id=%s&redirect=false", config.TorboxAPIKey, torrentID, fileID)
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+config.TorboxAPIKey)
