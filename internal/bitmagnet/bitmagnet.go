@@ -117,6 +117,9 @@ type TorrentFile struct {
 }
 
 func SearchTorrents(ctx context.Context, searchString, contentType string, limit int) ([]TorrentItem, error) {
+	// Diagnostic logger for verifying compiled exact-phrase, FTS OR-unions, and negation query execution
+	utils.Logger.Debug("executing bitmagnet search query", "query", searchString, "content_type", contentType, "limit", limit)
+
 	// We omit "orderBy" entirely from the query variables. 
 	// When "queryString" is provided, Bitmagnet natively defaults to sorting by "relevance" descending.
 	// Omitting it entirely avoids the complex GORM subquery pagination bug that generates the invalid "_order_1" column reference.
