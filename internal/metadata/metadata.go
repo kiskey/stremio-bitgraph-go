@@ -34,9 +34,10 @@ func init() {
 }
 
 type MetaResult struct {
-	Name   string
-	Year   string
-	Source string
+	Name      string
+	Year      string
+	Source    string
+	AltTitles []string
 }
 
 func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
@@ -80,7 +81,19 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 			year = rd[:4]
 		}
 	}
-	return &MetaResult{Name: name, Year: year, Source: "TMDB"}, nil
+
+	var altTitles []string
+	if typ == "series" {
+		if originalName, ok := item["original_name"].(string); ok && originalName != "" && originalName != name {
+			altTitles = append(altTitles, originalName)
+		}
+	} else {
+		if originalTitle, ok := item["original_title"].(string); ok && originalTitle != "" && originalTitle != name {
+			altTitles = append(altTitles, originalTitle)
+		}
+	}
+
+	return &MetaResult{Name: name, Year: year, Source: "TMDB", AltTitles: altTitles}, nil
 }
 
 func fetchCinemeta(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
@@ -110,7 +123,29 @@ func fetchCinemeta(ctx context.Context, imdbID, typ string) (*MetaResult, error)
 		yearStr = ri
 	}
 	match := yearRegexp.FindString(yearStr)
-	return &MetaResult{Name: name, Year: match, Source: "Cinemeta"}, nil
+
+	var altTitles []string
+	if orig, ok := meta["original_title"].(string); ok && orig != "" && orig != name {
+		altTitles = append(altTitles, orig)
+	}
+	if akas, ok := meta["aka"].([]interface{}); ok {
+		for _, aka := range akas {
+			if s, ok := aka.(string); ok && s != "" && s != name {
+				isUnique := true
+				for _, existing := range altTitles {
+					if existing == s {
+						isUnique = false
+						break
+					}
+				}
+				if isUnique {
+					altTitles = append(altTitles, s)
+				}
+			}
+		}
+	}
+
+	return &MetaResult{Name: name, Year: match, Source: "Cinemeta", AltTitles: altTitles}, nil
 }
 
 func fetchOmdb(ctx context.Context, imdbID string) (*MetaResult, error) {
@@ -136,7 +171,7 @@ func fetchOmdb(ctx context.Context, imdbID string) (*MetaResult, error) {
 	if year != "" {
 		year = strings.Split(year, "–")[0]
 	}
-	return &MetaResult{Name: name, Year: year, Source: "OMDb"}, nil
+	return &MetaResult{Name: name, Year: year, Source: "OMDb", AltTitles: nil}, nil
 }
 
 func fetchTrakt(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
@@ -173,7 +208,7 @@ func fetchTrakt(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 	if y, ok := item["year"].(float64); ok {
 		year = fmt.Sprintf("%.0f", y)
 	}
-	return &MetaResult{Name: name, Year: year, Source: "Trakt"}, nil
+	return &MetaResult{Name: name, Year: year, Source: "Trakt", AltTitles: nil}, nil
 }
 
 func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
@@ -193,7 +228,6 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 	go func() {
 		res, err := fetchTmdb(raceCtx, imdbID, typ)
 		if err != nil {
-			// Suppress expected context-canceled warnings caused by racing early-exit
 			if !errors.Is(err, context.Canceled) {
 				utils.Logger.Warn("TMDB failed", "error", err)
 			}
@@ -206,7 +240,6 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 	go func() {
 		res, err := fetchCinemeta(raceCtx, imdbID, typ)
 		if err != nil {
-			// Suppress expected context-canceled warnings caused by racing early-exit
 			if !errors.Is(err, context.Canceled) {
 				utils.Logger.Warn("Cinemeta failed", "error", err)
 			}
@@ -221,7 +254,7 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 	select {
 	case tmdbRes = <-tmdbChan:
 		if tmdbRes != nil {
-			cancel() // Abort Cinemeta connection immediately
+			cancel()
 			utils.Logger.Debug("resolved via TMDB (early-exit)", "name", tmdbRes.Name)
 			metaCache.Set(cacheKey, tmdbRes)
 			return tmdbRes, nil
@@ -233,14 +266,14 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 		}
 	case cinemetaRes = <-cinemetaChan:
 		if cinemetaRes != nil {
-			cancel() // Abort TMDB connection immediately
+			cancel()
 			utils.Logger.Info("resolved via Cinemeta (early-exit)", "name", cinemetaRes.Name)
 			metaCache.Set(cacheKey, cinemetaRes)
 			return cinemetaRes, nil
 		}
 		tmdbRes = <-tmdbChan
 		if tmdbRes != nil {
-			metaCache.Set(cacheKey, tmdbRes) // Corrected from .Store to .Set
+			metaCache.Set(cacheKey, tmdbRes)
 			return tmdbRes, nil
 		}
 	case <-ctx.Done():
