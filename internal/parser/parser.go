@@ -203,7 +203,13 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 }
 
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
-	cleanPath := normalizeEpisodePatterns(path)
+	// Extract the base filename to prevent parent folder names (e.g., S01 EP (01-08)) from polluting parsing
+	fileName := path
+	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
+		fileName = path[idx+1:]
+	}
+
+	cleanPath := normalizeEpisodePatterns(fileName)
 	info := rtp.ParseSeriesPath(cleanPath)
 	if info != nil && (info.SeasonNumber != 0 || len(info.EpisodeNumbers) > 0) {
 		episode := 0
@@ -255,7 +261,13 @@ func isExtraOrSpecialRelaxed(path string) bool {
 }
 
 func matchRange(path string, targetEpisode int) bool {
-	matches := rangeRegex.FindAllStringSubmatchIndex(path, -1)
+	// Extract base filename to prevent parent folder names from polluting range analysis
+	fileName := path
+	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
+		fileName = path[idx+1:]
+	}
+
+	matches := rangeRegex.FindAllStringSubmatchIndex(fileName, -1)
 	for _, match := range matches {
 		if len(match) >= 6 {
 			startNumStart := match[2]
@@ -264,15 +276,15 @@ func matchRange(path string, targetEpisode int) bool {
 			endNumEnd := match[5]
 
 			// Skip matches that are part of decimal numbers (e.g. 13.00-14.00)
-			if startNumStart > 0 && isDecimalDot(path, startNumStart-1) {
+			if startNumStart > 0 && isDecimalDot(fileName, startNumStart-1) {
 				continue
 			}
-			if endNumEnd < len(path) && isDecimalDot(path, endNumEnd) {
+			if endNumEnd < len(fileName) && isDecimalDot(fileName, endNumEnd) {
 				continue
 			}
 
-			startStr := path[startNumStart:startNumEnd]
-			endStr := path[endNumStart:endNumEnd]
+			startStr := fileName[startNumStart:startNumEnd]
+			endStr := fileName[endNumStart:endNumEnd]
 
 			start, err1 := strconv.Atoi(startStr)
 			end, err2 := strconv.Atoi(endStr)
