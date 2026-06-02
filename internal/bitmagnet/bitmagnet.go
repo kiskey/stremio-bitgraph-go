@@ -127,6 +127,9 @@ func SearchTorrents(ctx context.Context, searchString, contentType string, limit
 			},
 			"facets": map[string]interface{}{
 				"contentType": map[string]interface{}{"filter": []string{contentType}},
+				"torrentFileType": map[string]interface{}{
+					"filter": []string{"video"}, // Enforce server-side video filtering only
+				},
 			},
 		},
 	}
