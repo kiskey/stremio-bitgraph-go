@@ -120,15 +120,13 @@ type TorrentFile struct {
 }
 
 func SearchTorrents(ctx context.Context, searchString, contentType string, limit int) ([]TorrentItem, error) {
-	cleanQuery := strings.ReplaceAll(searchString, `\`, "")
-	cleanQuery = strings.ReplaceAll(cleanQuery, `"`, "")
 	variables := map[string]interface{}{
 		"input": map[string]interface{}{
-			"queryString": cleanQuery,
+			"queryString": searchString,
 			"limit":       limit,
 			"orderBy": []map[string]interface{}{
-				{"field": "published_at", "descending": true},
-				{"field": "seeders", "descending": true},
+				{"field": "relevance", "descending": true}, // relevance sorting on hot path
+				{"field": "seeders", "descending": true},   // fallback quality sorting
 			},
 			"facets": map[string]interface{}{
 				"contentType": map[string]interface{}{"filter": []string{contentType}},
