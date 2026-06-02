@@ -117,14 +117,13 @@ type TorrentFile struct {
 }
 
 func SearchTorrents(ctx context.Context, searchString, contentType string, limit int) ([]TorrentItem, error) {
+	// We omit "orderBy" entirely from the query variables. 
+	// When "queryString" is provided, Bitmagnet natively defaults to sorting by "relevance" descending.
+	// Omitting it entirely avoids the complex GORM subquery pagination bug that generates the invalid "_order_1" column reference.
 	variables := map[string]interface{}{
 		"input": map[string]interface{}{
 			"queryString": searchString,
 			"limit":       limit,
-			"orderBy": []map[string]interface{}{
-				{"field": "relevance", "descending": true}, // Sort by FTS relevance first
-				{"field": "seeders", "descending": true},   // Sort best exact matches by health
-			},
 			"facets": map[string]interface{}{
 				"contentType": map[string]interface{}{"filter": []string{contentType}},
 				"torrentFileType": map[string]interface{}{
