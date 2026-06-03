@@ -56,12 +56,10 @@ func NewOptimizedClient(timeout time.Duration) *http.Client {
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				// Force IPv4 (tcp4) to completely bypass IPv6 DNS/handshake hangs on unprivileged LXC/Docker/Wireguard networks
-				return (&net.ConnDialer{
-					Dialer: net.Dialer{
-						Timeout:   5 * time.Second,
-						KeepAlive: 30 * time.Second,
-					},
-				}).Dialer.DialContext(ctx, "tcp4", addr)
+				return (&net.Dialer{
+					Timeout:   5 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext(ctx, "tcp4", addr)
 			},
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 20,
