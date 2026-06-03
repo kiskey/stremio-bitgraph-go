@@ -52,7 +52,7 @@ func init() {
 
 	AddonID = "org.stremio.go.bitmagnet"
 	AddonName = "GoMagnet"
-	AddonVersion = "7.2.1" // Incremented for server-side negation and video facet filtering
+	AddonVersion = "7.2.1" // Incremented for server-side negation, video facet filtering, and multi-season supports
 
 	RealDebridAPIKey = os.Getenv("REALDEBRID_API_KEY")
 	TmdbAPIKey = os.Getenv("TMDB_API_KEY")
