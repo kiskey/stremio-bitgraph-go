@@ -3,6 +3,7 @@ package matcher
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
