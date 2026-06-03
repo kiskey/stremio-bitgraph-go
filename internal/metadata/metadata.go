@@ -65,11 +65,51 @@ type cinemetaMetaResponse struct {
 	} `json:"meta"`
 }
 
+// stripDiacritics maps standard Latin-1 and advanced unicode diacritics to ASCII base characters
+func stripDiacritics(s string) string {
+	var replacer = strings.NewReplacer(
+		"ā", "a", "á", "a", "à", "a", "ä", "a", "â", "a", "ã", "a", "å", "a",
+		"ē", "e", "é", "e", "è", "e", "ë", "e", "ê", "e",
+		"ī", "i", "í", "i", "ì", "i", "ï", "i", "î", "i",
+		"ō", "o", "ó", "o", "ò", "o", "ö", "o", "ô", "o", "õ", "o", "ø", "o",
+		"ū", "u", "ú", "u", "ù", "u", "ü", "u", "û", "u",
+		"ý", "y", "ÿ", "y",
+		"ñ", "n", "ç", "c",
+		"Ā", "A", "Á", "A", "À", "A", "Ä", "A", "Â", "A", "Ã", "A", "Å", "A",
+		"Ē", "E", "É", "E", "È", "E", "Ë", "E", "Ê", "E",
+		"Ī", "I", "Í", "I", "Ì", "I", "Ï", "I", "Î", "I",
+		"Ō", "O", "Ó", "O", "Ò", "O", "Ö", "O", "Ô", "O", "Õ", "O", "Ø", "O",
+		"Ū", "U", "Ú", "U", "Ù", "U", "Ü", "U", "Û", "U",
+		"Ý", "Y", "Ñ", "N", "Ç", "C",
+	)
+	return replacer.Replace(s)
+}
+
+// injectNormalizedAltTitle adds the un-accented ASCII representation to AltTitles if it differs from the primary name
+func injectNormalizedAltTitle(res *MetaResult) {
+	if res == nil {
+		return
+	}
+	normalized := stripDiacritics(res.Name)
+	if normalized != res.Name {
+		isUnique := true
+		for _, existing := range res.AltTitles {
+			if existing == normalized {
+				isUnique = false
+				break
+			}
+		}
+		if isUnique {
+			res.AltTitles = append(res.AltTitles, normalized)
+		}
+	}
+}
+
 // executeWithRetry provides resilient, allocation-free execution for external API calls
 func executeWithRetry(ctx context.Context, fn func(context.Context) (*MetaResult, error)) (*MetaResult, error) {
 	res, err := fn(ctx)
 	if err != nil && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "deadline exceeded") || strings.Contains(err.Error(), "timeout")) {
-		// Decouple from exhausted parent context and run a quick, fresh 2-second retry
+		// Attempt a single fast retry with a fresh context to avoid parent deadline exhaustion
 		retryCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		return fn(retryCtx)
@@ -95,10 +135,8 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 			return nil, err
 		}
 
-		name := ""
-		year := ""
+		name, year := "", ""
 		var altTitles []string
-
 		if typ == "series" {
 			if len(data.TvResults) == 0 {
 				return nil, fmt.Errorf("not found")
@@ -276,29 +314,8 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 	tmdbChan := make(chan *MetaResult, 1)
 	cinemetaChan := make(chan *MetaResult, 1)
 
-	go func() {
-		res, err := fetchTmdb(raceCtx, imdbID, typ)
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				utils.Logger.Warn("TMDB failed", "error", err)
-			}
-			tmdbChan <- nil
-			return
-		}
-		tmdbChan <- res
-	}()
-
-	go func() {
-		res, err := fetchCinemeta(raceCtx, imdbID, typ)
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				utils.Logger.Warn("Cinemeta failed", "error", err)
-			}
-			cinemetaChan <- nil
-			return
-		}
-		cinemetaChan <- res
-	}()
+	go func() { tmdbChan <- func() *MetaResult { r, _ := fetchTmdb(raceCtx, imdbID, typ); return r }() }()
+	go func() { cinemetaChan <- func() *MetaResult { r, _ := fetchCinemeta(raceCtx, imdbID, typ); return r }() }()
 
 	var tmdbRes, cinemetaRes *MetaResult
 
@@ -307,11 +324,13 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 		if tmdbRes != nil {
 			cancel()
 			utils.Logger.Debug("resolved via TMDB (early-exit)", "name", tmdbRes.Name)
+			injectNormalizedAltTitle(tmdbRes)
 			metaCache.Set(cacheKey, tmdbRes)
 			return tmdbRes, nil
 		}
 		cinemetaRes = <-cinemetaChan
 		if cinemetaRes != nil {
+			injectNormalizedAltTitle(cinemetaRes)
 			metaCache.Set(cacheKey, cinemetaRes)
 			return cinemetaRes, nil
 		}
@@ -319,11 +338,13 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 		if cinemetaRes != nil {
 			cancel()
 			utils.Logger.Info("resolved via Cinemeta (early-exit)", "name", cinemetaRes.Name)
+			injectNormalizedAltTitle(cinemetaRes)
 			metaCache.Set(cacheKey, cinemetaRes)
 			return cinemetaRes, nil
 		}
 		tmdbRes = <-tmdbChan
 		if tmdbRes != nil {
+			injectNormalizedAltTitle(tmdbRes)
 			metaCache.Set(cacheKey, tmdbRes)
 			return tmdbRes, nil
 		}
@@ -336,23 +357,19 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 		g2, ctx2 := errgroup.WithContext(ctx)
 		var omdbRes, traktRes *MetaResult
 		if omdbClient != nil {
-			g2.Go(func() error {
-				omdbRes, _ = fetchOmdb(ctx2, imdbID)
-				return nil
-			})
+			g2.Go(func() error { omdbRes, _ = fetchOmdb(ctx2, imdbID); return nil })
 		}
 		if traktClient != nil {
-			g2.Go(func() error {
-				traktRes, _ = fetchTrakt(ctx2, imdbID, typ)
-				return nil
-			})
+			g2.Go(func() error { traktRes, _ = fetchTrakt(ctx2, imdbID, typ); return nil })
 		}
 		_ = g2.Wait()
 		if omdbRes != nil {
+			injectNormalizedAltTitle(omdbRes)
 			metaCache.Set(cacheKey, omdbRes)
 			return omdbRes, nil
 		}
 		if traktRes != nil {
+			injectNormalizedAltTitle(traktRes)
 			metaCache.Set(cacheKey, traktRes)
 			return traktRes, nil
 		}
