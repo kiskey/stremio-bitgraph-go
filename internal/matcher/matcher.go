@@ -29,7 +29,7 @@ type Stream struct {
 	IsCached    bool
 }
 
-// Static Low-Entropy Stop Words Set for PN-SILEC Filtering
+// Static Low-Entropy Grammatical Stop Words Set for PN-SILEC Filtering
 var stopWords = map[string]bool{
 	"the": true, "a": true, "an": true, "and": true, "or": true,
 	"of": true, "in": true, "on": true, "at": true, "to": true,
@@ -59,6 +59,9 @@ var metadataWords = map[string]bool{
 	"51": true, "71": true, "20": true, "10bit": true, "remux": true,
 	"3d": true, "sdr": true, "gb": true, "mb": true, "kb": true,
 	"web": true, "dl": true, "hd": true,
+	"complete": true, "repack": true, "proper": true, "vostfr": true,
+	"subs":     true, "sub": true, "esub": true, "vof": true, "vff": true,
+	"vf":       true, "season": true, "series": true, "episode": true, "pack": true,
 }
 
 // sequelIndicators are words that strongly suggest a different franchise entry.
@@ -159,6 +162,62 @@ func cleanWord(w string) string {
 	}, strings.ToLower(w))
 }
 
+// isTechnicalToken performs an allocation-free dynamic check to identify season, episode,
+// and pack-specific serialization tokens, allowing them to safely bypass the guardrail.
+func isTechnicalToken(s string) bool {
+	// 1. Direct O(1) Map Lookups
+	if metadataWords[s] || stopWords[s] {
+		return true
+	}
+
+	// 2. Standalone Numeric Check (handles raw numbering, e.g. "1", "01")
+	if isNumber(s) {
+		return true
+	}
+
+	// 3. Dynamic Prefix + Number Parsing (Allocation-Free Slicing)
+	if len(s) >= 2 {
+		// "s1", "e1", "p1"
+		first := s[0]
+		if (first == 's' || first == 'e' || first == 'p') && isNumber(s[1:]) {
+			return true
+		}
+		// "se1", "ep1"
+		if len(s) >= 3 {
+			prefix2 := s[:2]
+			if (prefix2 == "se" || prefix2 == "ep") && isNumber(s[2:]) {
+				return true
+			}
+		}
+		// "epi1"
+		if len(s) >= 4 {
+			if s[:3] == "epi" && isNumber(s[3:]) {
+				return true
+			}
+		}
+		// "seas1", "part1"
+		if len(s) >= 5 {
+			prefix4 := s[:4]
+			if (prefix4 == "seas" || prefix4 == "part") && isNumber(s[4:]) {
+				return true
+			}
+		}
+		// "season1", "series1"
+		if len(s) >= 7 {
+			if s[:6] == "season" && isNumber(s[6:]) {
+				return true
+			}
+		}
+		// "episode1"
+		if len(s) >= 8 {
+			if s[:7] == "episode" && isNumber(s[7:]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // passTitleGuardrail prevents single-word titles (e.g. "Up", "It") from matching
 // unrelated multi-word torrents (e.g. "Upgraded", "Italian"). It allows metadata
 // words (codecs, quality tags, languages) to pass through.
@@ -199,9 +258,9 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 				if cw == "" {
 					continue
 				}
-				// If the extra word is NOT a stop word and NOT a technical metadata word,
+				// If the extra word is NOT a stop word and NOT a technical metadata word/pattern,
 				// we flag it as an unauthorizedProperNoun (indicating a different show entity).
-				if !stopWords[cw] && !metadataWords[cw] {
+				if !isTechnicalToken(cw) {
 					hasSubstantiveProperNoun = true
 					break
 				}
@@ -224,7 +283,7 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 			hasExtraNonMeta := false
 			for _, w := range parsedWords {
 				cw := cleanWord(w)
-				if cw != "" && cw != singleWord && !metadataWords[cw] && !stopWords[cw] {
+				if cw != "" && cw != singleWord && !isTechnicalToken(cw) {
 					hasExtraNonMeta = true
 					break
 				}
