@@ -269,12 +269,14 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 
 		_ = g.Wait()
 
-		refinedResult, refinedCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, meta.AltTitles, season, episode, refinedTorrents, cachedRows, config.PreferredLanguages)
+		// Pass the retrieved primary title & its compiled alternate titles list to the matcher.
+		// We use PublishedAt inside TorrentItem as a zero-allocation vector to pass the premiere year.
+		refinedResult, refinedCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, meta.AltTitles, season, episode, refinedTorrents, cachedRows, config.PreferredLanguages)
 		resultStreams = refinedResult
 		cachedStreams = refinedCached
 
 		if len(refinedTorrents) < 10 || len(resultStreams) == 0 {
-			broadResult, broadCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, meta.AltTitles, season, episode, broadTorrents, cachedRows, config.PreferredLanguages)
+			broadResult, broadCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, meta.AltTitles, season, episode, broadTorrents, cachedRows, config.PreferredLanguages)
 			existing := make(map[string]bool)
 			for _, s := range resultStreams {
 				existing[s.InfoHash] = true
