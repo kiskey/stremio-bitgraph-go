@@ -148,15 +148,6 @@ func extractInfoHash(magnet string) string {
 
 func (t *torboxProvider) checkRateLimit() bool {
 	t.mu.Lock()
-	for _, ts := range t.addTimestamps {
-		if ts.After(time.Now().Add(-60 * time.Second)) {
-			t.addTimestamps = append(t.addTimestamps, ts)
-		}
-	}
-	t.addTimestamps = t.addTimestamps[:0]
-	t.mu.Unlock()
-
-	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
 	cutoff := now.Add(-60 * time.Second)
