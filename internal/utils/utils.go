@@ -1,7 +1,7 @@
-
 package utils
 
 import (
+	"context" // Added to support DialContext signatures
 	"fmt"
 	"log/slog"
 	"net"
@@ -49,15 +49,20 @@ func SetLogLevel(level string) {
 	}
 }
 
-// NewOptimizedClient creates an HTTP client with high connection reuse & HTTP2 enabled
+// NewOptimizedClient creates an HTTP client with high connection reuse, HTTP2, and forced IPv4 loop resolution
 func NewOptimizedClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   5 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				// Force IPv4 (tcp4) to completely bypass IPv6 DNS/handshake hangs on unprivileged LXC/Docker/Wireguard networks
+				return (&net.ConnDialer{
+					Dialer: net.Dialer{
+						Timeout:   5 * time.Second,
+						KeepAlive: 30 * time.Second,
+					},
+				}).Dialer.DialContext(ctx, "tcp4", addr)
+			},
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 20,
 			IdleConnTimeout:     90 * time.Second,
