@@ -122,6 +122,8 @@ var ignoredNumbers = map[string]bool{
 	"576": true, "264": true, "265": true, "10": true, "8": true,
 }
 
+var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to)\s*0*(\d+)\b`)
+
 // isBlockedArchive checks if a torrent name is a compressed archive that Stremio cannot play
 func isBlockedArchive(name string) bool {
 	lower := strings.ToLower(name)
@@ -170,7 +172,7 @@ func isTechnicalToken(s string) bool {
 		return true
 	}
 
-	// 2. Standalone Numeric Check (handles raw numbering, e.g. "1", "01")
+	// 2. Standalone Number Check (e.g. "1", "01")
 	if isNumber(s) {
 		return true
 	}
@@ -753,8 +755,19 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 				return nil
 			}
 
-			bestLang := getBestLanguage(t.Languages, preferredLanguages)
+			// SPEBC: Block older remakes by checking if the torrent year is older than the premiere year
 			parsed := parser.RobustParseInfo(td.Name, 0)
+			if parsed.Year != 0 && tmdbShow.PublishedAt != "" {
+				premiereY, err := strconv.Atoi(tmdbShow.PublishedAt)
+				if err == nil {
+					if parsed.Year < premiereY-1 {
+						utils.Logger.Debug("filtering out series torrent: failed earliest premiere year check", "torrent_year", parsed.Year, "premiere_year", premiereY)
+						return nil
+					}
+				}
+			}
+
+			bestLang := getBestLanguage(t.Languages, preferredLanguages)
 			if bestLang == "en" && parsed.Language != "en" && parsed.Language != "" {
 				bestLang = parsed.Language
 			}
@@ -769,9 +782,19 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 				return nil
 			}
 
+			// CSRC Range Check: Overrides strict season matching if a multi-season range is detected
+			isMultiSeasonPack := false
+			if matches := seasonRangeRegex.FindStringSubmatch(td.Name); len(matches) >= 3 {
+				startS, _ := strconv.Atoi(matches[1])
+				endS, _ := strconv.Atoi(matches[2])
+				if season >= startS && season <= endS {
+					isMultiSeasonPack = true
+				}
+			}
+
 			var local []Stream
 
-			if parsed.Season == season {
+			if parsed.Season == season || isMultiSeasonPack {
 				if td.FilesStatus == "single" {
 					if parsed.Episode != 0 && parsed.Episode != episode {
 						return nil
