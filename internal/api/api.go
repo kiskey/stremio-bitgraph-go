@@ -150,8 +150,8 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if torrentInfo == nil && config.DebridProvider != "" {
-		row := db.Pool.QueryRow(ctx,
-			"SELECT torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2 AND content_type = $3 AND provider = $4",
+		row := db.Pool.QueryRowContext(ctx,
+			"SELECT torrent_info_json FROM torrents WHERE infohash = ?1 AND tmdb_id = ?2 AND content_type = ?3 AND provider = ?4",
 			infoHash, imdbID, typ, config.DebridProvider)
 		var jsonData []byte
 		err := row.Scan(&jsonData)
@@ -335,12 +335,13 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 				"torrent_info": readyTorrent,
 			})
 
-			_, _ = db.Pool.Exec(ctx,
+			torrentJSON, _ := json.Marshal(readyTorrent)
+			_, _ = db.Pool.ExecContext(ctx,
 				`INSERT INTO torrents (infohash, tmdb_id, content_type, provider, torrent_info_json, language, quality, seeders)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
 				 ON CONFLICT (infohash, tmdb_id, content_type, provider)
 				 DO UPDATE SET torrent_info_json = EXCLUDED.torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
-				infoHash, imdbID, typ, config.DebridProvider, readyTorrent, lang, utils.GetQuality(readyTorrent.Filename), readyTorrent.Seeders)
+				infoHash, imdbID, typ, config.DebridProvider, string(torrentJSON), lang, utils.GetQuality(readyTorrent.Filename), readyTorrent.Seeders)
 
 			url, err := resolveDownloadURL(ctx, provider, readyTorrent, typ, season, episode)
 			if err != nil {
