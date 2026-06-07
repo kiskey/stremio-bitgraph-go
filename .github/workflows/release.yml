@@ -20,19 +20,14 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+          cache: true
 
-      # Critical: Configure Git authentication for your private "releasetitleparser" module
-      - name: Configure Git for Private Modules
-        env:
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PAT }}
+      # Replicates your exact working dynamic dependency resolution pipeline
+      - name: Fetch dependencies and generate go.sum dynamically
         run: |
-          if [ -n "$PERSONAL_ACCESS_TOKEN" ]; then
-            git config --global url."https://${PERSONAL_ACCESS_TOKEN}@github.com/".insteadOf "https://github.com/"
-          fi
-          go env -w GOPRIVATE="github.com/ovrlord-app/*"
-
-      - name: Download Dependencies
-        run: go mod download
+          go get github.com/xrash/smetrics@latest
+          go get github.com/ovrlord-app/releasetitleparser@latest
+          go mod tidy
 
       - name: Build Static Binaries
         run: |
