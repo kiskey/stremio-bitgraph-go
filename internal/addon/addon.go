@@ -186,9 +186,42 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			defer wg.Done()
 			if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
-				rows, _ := db.Pool.Query(ctx,
-					"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
+				rows, err := db.Pool.QueryContext(ctx,
+					"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = ?1 AND content_type = ?2 AND torrent_info_json IS NOT NULL AND provider = ?3",
 					imdbID, typ, config.DebridProvider)
+				if err == nil && rows != nil {
+					defer rows.Close()
+					for rows.Next() {
+						var infohash, language, quality string
+						var torrentInfoJSON []byte
+						var seeders int32
+						rows.Scan(&infohash, &torrentInfoJSON, &language, &quality, &seeders)
+						var tinfo map[string]interface{}
+						json.Unmarshal(torrentInfoJSON, &tinfo)
+						cachedRows = append(cachedRows, map[string]interface{}{
+							"infohash":          infohash,
+							"language":          language,
+							"quality":           quality,
+							"seeders":           seeders,
+							"torrent_info_json": tinfo,
+						})
+					}
+				}
+			}
+		}()
+
+		wg.Wait()
+
+		if searchErr != nil || len(torrents) == 0 {
+			json.NewEncoder(w).Encode(StreamResponse{Streams: []Stream{}})
+			return
+		}
+	} else {
+		if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
+			rows, err := db.Pool.QueryContext(ctx,
+				"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = ?1 AND content_type = ?2 AND torrent_info_json IS NOT NULL AND provider = ?3",
+				imdbID, typ, config.DebridProvider)
+			if err == nil && rows != nil {
 				defer rows.Close()
 				for rows.Next() {
 					var infohash, language, quality string
@@ -205,35 +238,6 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 						"torrent_info_json": tinfo,
 					})
 				}
-			}
-		}()
-
-		wg.Wait()
-
-		if searchErr != nil || len(torrents) == 0 {
-			json.NewEncoder(w).Encode(StreamResponse{Streams: []Stream{}})
-			return
-		}
-	} else {
-		if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
-			rows, _ := db.Pool.Query(ctx,
-				"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
-				imdbID, typ, config.DebridProvider)
-			defer rows.Close()
-			for rows.Next() {
-				var infohash, language, quality string
-				var torrentInfoJSON []byte
-				var seeders int32
-				rows.Scan(&infohash, &torrentInfoJSON, &language, &quality, &seeders)
-				var tinfo map[string]interface{}
-				json.Unmarshal(torrentInfoJSON, &tinfo)
-				cachedRows = append(cachedRows, map[string]interface{}{
-					"infohash":          infohash,
-					"language":          language,
-					"quality":           quality,
-					"seeders":           seeders,
-					"torrent_info_json": tinfo,
-				})
 			}
 		}
 	}
