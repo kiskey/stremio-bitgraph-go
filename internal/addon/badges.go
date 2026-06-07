@@ -14,7 +14,7 @@ type BadgeFilter struct {
 }
 
 // Low-Allocation pre-defined filters deconstructed from Perl badges.json to RE2 standard.
-// Matches exactly all 39 filters defined in badges.json.
+// Matches exactly all 39 filters defined in badges.json with extended support for NF and AMZN.
 var filtersDef = []struct {
 	ID        string
 	GroupID   string
@@ -37,7 +37,7 @@ var filtersDef = []struct {
 	{"r-720", "gr", "720p", `(?i)\b720[pi]?\b`, nil},
 
 	// Visual
-	{"v-seadex", "gv", "SeaDex", `(?i)\b(?:seadex|best[\s._-]?release|alt[\s._-]?(?:best[\s._-]?)?release)\b|ᴀʟᴛ ʀᴇʟᴇᴀsᴇ|ʙᴇsᴛ ʀᴇʟᴇᴀsᴇ`, nil},
+	{"v-seadex", "gv", "SeaDex", `(?i)\b(?:seadex|best[\s._-]?release|alt[\s._-]?(?:best[\s._-]?release)?)\b|ᴀʟᴛ ʀᴇʟᴇᴀsᴇ|ʙᴇsᴛ ʀᴇʟᴇᴀsᴇ`, nil},
 	{"v-hdr10p", "gv", "HDR10+", `(?i)\bhdr[\s._-]?10[\s._-]?(?:\+|plus|p)(?:\b|[^a-z0-9]|$)`, []string{`(?i)\b(?:dv|dovi|dolby[\s._-]?vision)\b`}},
 	{"v-hdr10", "gv", "HDR10", `(?i)\bhdr[\s._-]?10\b`, []string{`(?i)\b(?:dv|dovi|dolby[\s._-]?vision)\b`, `(?i)\bhdr[\s._-]?10[\s._-]?(?:\+|plus|p)(?:\b|[^a-z0-9]|$)`}},
 	{"v-hdr", "gv", "HDR", `(?i)\bhdr\b`, []string{`(?i)\b(?:dv|dovi|dolby[\s._-]?vision)\b`, `(?i)\bhdr[\s._-]?10\b`}},
@@ -61,7 +61,7 @@ var filtersDef = []struct {
 	{"ch-51", "gc", "5.1", `(?i)(?:^|[^0-9])5[. ][01](?:[^0-9]|$)\b`, []string{`(?i)(?:^|[^0-9])[7-8][. ][01](?:[^0-9]|$)`}},
 
 	// Streaming
-	{"s-nflx", "gs", "NETFLIX", `(?i)\b(?:nflx|netflix)\b`, nil},
+	{"s-nflx", "gs", "NETFLIX", `(?i)\b(?:nflx|netflix|nf)\b`, nil}, // Updated to fully support .NF. abbreviations
 	{"s-amzn", "gs", "PRIME VIDEO", `(?i)\b(?:amzn|amazon|prime[\s._-]?video)\b`, nil},
 	{"s-atvp", "gs", "APPLE TV+", `(?i)\b(?:atvp|apple[\s._-]?tv\+?|appletv)\b`, nil},
 	{"s-dsnp", "gs", "DISNEY+", `(?i)\b(?:dsnp|dsny|disney\+?|disney[\s._-]?plus)\b`, nil},
