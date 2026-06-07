@@ -52,7 +52,7 @@ func init() {
 
 	AddonID = "org.stremio.go.bitmagnet"
 	AddonName = "GoMagnet"
-	AddonVersion = "7.2.1" // Incremented for server-side negation, video facet filtering, and multi-season supports
+	AddonVersion = "7.2.2" // Incremented for SQLite migration release
 
 	RealDebridAPIKey = os.Getenv("REALDEBRID_API_KEY")
 	TmdbAPIKey = os.Getenv("TMDB_API_KEY")
@@ -114,9 +114,6 @@ func init() {
 	}
 	if BitmagnetGQLEndpoint == "" {
 		missing = append(missing, "BITMAGNET_GRAPHQL_ENDPOINT")
-	}
-	if DatabaseURL == "" {
-		missing = append(missing, "DATABASE_URL")
 	}
 	if len(missing) > 0 {
 		panic(fmt.Sprintf("Missing critical environment variables: %s", strings.Join(missing, ", ")))

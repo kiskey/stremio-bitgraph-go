@@ -1,0 +1,48 @@
+name: Release GoMagnet Binary
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release Static Binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      # Replicates your exact working dynamic dependency resolution pipeline
+      - name: Fetch dependencies and generate go.sum dynamically
+        run: |
+          go get github.com/xrash/smetrics@latest
+          go get github.com/ovrlord-app/releasetitleparser@latest
+          go mod tidy
+
+      - name: Build Static Binaries
+        run: |
+          mkdir -p dist
+          # Compile with CGO disabled and stripping symbols (-s -w) to create highly optimized, alpine-ready binaries
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/gomagnet-linux-amd64 ./cmd/server
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/gomagnet-linux-arm64 ./cmd/server
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/gomagnet-linux-amd64
+            dist/gomagnet-linux-arm64
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

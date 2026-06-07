@@ -18,6 +18,7 @@ import (
 	"github.com/user/stremio-bitgraph-go/internal/debrid"
 	"github.com/user/stremio-bitgraph-go/internal/matcher"
 	"github.com/user/stremio-bitgraph-go/internal/metadata"
+	"github.com/user/stremio-bitgraph-go/internal/parser"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -125,6 +126,18 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 	return query
 }
 
+// checkPackOrRange delegates token scanning strictly to the parsed domain layer (parser.go)
+func checkPackOrRange(name string, targetE int) string {
+	isPack, start, end, hasRange := parser.ParsePackOrRange(name, targetE)
+	if isPack {
+		return " (📦 Season Pack)"
+	}
+	if hasRange {
+		return fmt.Sprintf(" (🔢 Batch E%02d-%02d)", start, end)
+	}
+	return ""
+}
+
 func streamHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	typ := chi.URLParam(r, "type")
@@ -141,10 +154,13 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 	utils.Logger.Info("stream request", "type", typ, "id", id, "decoded_id", idDecoded)
 
 	var imdbID, seasonStr, episodeStr string
+	var season, episode int
 	if typ == "series" {
 		parts := strings.Split(idDecoded, ":")
 		if len(parts) >= 3 {
 			imdbID, seasonStr, episodeStr = parts[0], parts[1], parts[2]
+			season, _ = strconv.Atoi(seasonStr)
+			episode, _ = strconv.Atoi(episodeStr)
 		}
 	} else {
 		imdbID = idDecoded
@@ -186,9 +202,42 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			defer wg.Done()
 			if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
-				rows, _ := db.Pool.Query(ctx,
-					"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
+				rows, err := db.Pool.QueryContext(ctx,
+					"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = ?1 AND content_type = ?2 AND torrent_info_json IS NOT NULL AND provider = ?3",
 					imdbID, typ, config.DebridProvider)
+				if err == nil && rows != nil {
+					defer rows.Close()
+					for rows.Next() {
+						var infohash, language, quality string
+						var torrentInfoJSON []byte
+						var seeders int32
+						rows.Scan(&infohash, &torrentInfoJSON, &language, &quality, &seeders)
+						var tinfo map[string]interface{}
+						json.Unmarshal(torrentInfoJSON, &tinfo)
+						cachedRows = append(cachedRows, map[string]interface{}{
+							"infohash":          infohash,
+							"language":          language,
+							"quality":           quality,
+							"seeders":           seeders,
+							"torrent_info_json": tinfo,
+						})
+					}
+				}
+			}
+		}()
+
+		wg.Wait()
+
+		if searchErr != nil || len(torrents) == 0 {
+			json.NewEncoder(w).Encode(StreamResponse{Streams: []Stream{}})
+			return
+		}
+	} else {
+		if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
+			rows, err := db.Pool.QueryContext(ctx,
+				"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = ?1 AND content_type = ?2 AND torrent_info_json IS NOT NULL AND provider = ?3",
+				imdbID, typ, config.DebridProvider)
+			if err == nil && rows != nil {
 				defer rows.Close()
 				for rows.Next() {
 					var infohash, language, quality string
@@ -206,42 +255,11 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					})
 				}
 			}
-		}()
-
-		wg.Wait()
-
-		if searchErr != nil || len(torrents) == 0 {
-			json.NewEncoder(w).Encode(StreamResponse{Streams: []Stream{}})
-			return
-		}
-	} else {
-		if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
-			rows, _ := db.Pool.Query(ctx,
-				"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
-				imdbID, typ, config.DebridProvider)
-			defer rows.Close()
-			for rows.Next() {
-				var infohash, language, quality string
-				var torrentInfoJSON []byte
-				var seeders int32
-				rows.Scan(&infohash, &torrentInfoJSON, &language, &quality, &seeders)
-				var tinfo map[string]interface{}
-				json.Unmarshal(torrentInfoJSON, &tinfo)
-				cachedRows = append(cachedRows, map[string]interface{}{
-					"infohash":          infohash,
-					"language":          language,
-					"quality":           quality,
-					"seeders":           seeders,
-					"torrent_info_json": tinfo,
-				})
-			}
 		}
 	}
 
 	var resultStreams, cachedStreams []matcher.Stream
 	if typ == "series" {
-		season, _ := strconv.Atoi(seasonStr)
-		episode, _ := strconv.Atoi(episodeStr)
 		sVal := season
 		var sPadded string
 		if sVal < 10 {
@@ -416,10 +434,38 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			if s.IsCached {
 				prefix = "⚡"
 			}
+			providerLabel := "RD"
+			if config.DebridProvider == "torbox" {
+				providerLabel = "TB"
+			}
+
+			langFlag := strings.ToUpper(s.Language)
+			matchedBadges := parser.FormatBadges(s.TorrentName)
+
+			// Formulate Stream Name (the button text)
+			streamName := fmt.Sprintf("[%s %s] %s | %s | %s", prefix, providerLabel, langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
+
+			// Formulate Stream Title (the description block) with Option B de-cluttered layout
+			var titleBuilder strings.Builder
+			if typ == "series" {
+				packOrRange := checkPackOrRange(s.TorrentName, episode)
+				titleBuilder.WriteString(fmt.Sprintf("📺 %s S%02dE%02d%s\n", meta.Name, season, episode, packOrRange))
+			} else {
+				if meta.Year != "" {
+					titleBuilder.WriteString(fmt.Sprintf("🎬 %s (%s)\n", meta.Name, meta.Year))
+				} else {
+					titleBuilder.WriteString(fmt.Sprintf("🎬 %s\n", meta.Name))
+				}
+			}
+			if matchedBadges != "" {
+				titleBuilder.WriteString(fmt.Sprintf("✨ %s\n", matchedBadges))
+			}
+			titleBuilder.WriteString(fmt.Sprintf("⚡ Peer Health: 👤 %d seeders", s.Seeders))
+
 			url := fmt.Sprintf("%s/%s/stream/%s/%s/%s", config.AppHost, config.AddonID, typ, id, s.InfoHash)
 			streams = append(streams, Stream{
-				Name:  fmt.Sprintf("[%s RD] %s | %s", prefix, strings.ToUpper(s.Language), strings.ToUpper(s.Quality)),
-				Title: fmt.Sprintf("%s\n💾 %s | 👤 %d seeders", s.TorrentName, utils.FormatSize(s.Size), s.Seeders),
+				Name:  streamName,
+				Title: titleBuilder.String(),
 				URL:   url,
 			})
 		}
@@ -429,9 +475,33 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			if typ == "series" {
 				bh["bingeGroup"] = imdbID
 			}
+
+			langFlag := strings.ToUpper(s.Language)
+			matchedBadges := parser.FormatBadges(s.TorrentName)
+
+			// Formulate Stream Name (the button text)
+			streamName := fmt.Sprintf("[🧲 P2P] %s | %s | %s", langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
+
+			// Formulate Stream Title (the description block) with Option B de-cluttered layout
+			var titleBuilder strings.Builder
+			if typ == "series" {
+				packOrRange := checkPackOrRange(s.TorrentName, episode)
+				titleBuilder.WriteString(fmt.Sprintf("📺 %s S%02dE%02d%s\n", meta.Name, season, episode, packOrRange))
+			} else {
+				if meta.Year != "" {
+					titleBuilder.WriteString(fmt.Sprintf("🎬 %s (%s)\n", meta.Name, meta.Year))
+				} else {
+					titleBuilder.WriteString(fmt.Sprintf("🎬 %s\n", meta.Name))
+				}
+			}
+			if matchedBadges != "" {
+				titleBuilder.WriteString(fmt.Sprintf("✨ %s\n", matchedBadges))
+			}
+			titleBuilder.WriteString(fmt.Sprintf("⚡ Peer Health: 👤 %d seeders", s.Seeders))
+
 			streams = append(streams, Stream{
-				Name:          fmt.Sprintf("[Bitgraph P2P] %s | %s", strings.ToUpper(s.Language), strings.ToUpper(s.Quality)),
-				Title:         fmt.Sprintf("%s\n💾 %s | 👤 %d seeders", s.TorrentName, utils.FormatSize(s.Size), s.Seeders),
+				Name:          streamName,
+				Title:         titleBuilder.String(),
 				InfoHash:      s.InfoHash,
 				FileIdx:       s.FileIndex,
 				BehaviorHints: bh,
