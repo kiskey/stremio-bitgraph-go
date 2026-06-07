@@ -34,146 +34,270 @@ func init() {
 }
 
 type MetaResult struct {
-	Name   string
-	Year   string
-	Source string
+	Name      string
+	Year      string
+	Source    string
+	AltTitles []string
+}
+
+// Low-Allocation Structs for TMDB Deserialization
+type tmdbFindResponse struct {
+	MovieResults []struct {
+		Title         string `json:"title"`
+		ReleaseDate   string `json:"release_date"`
+		OriginalTitle string `json:"original_title"`
+	} `json:"movie_results"`
+	TvResults []struct {
+		Name         string `json:"name"`
+		FirstAirDate string `json:"first_air_date"`
+		OriginalName string `json:"original_name"`
+	} `json:"tv_results"`
+}
+
+// Low-Allocation Structs for Cinemeta Deserialization
+type cinemetaMetaResponse struct {
+	Meta struct {
+		Name          string   `json:"name"`
+		Year          string   `json:"year"`
+		ReleaseInfo   string   `json:"releaseInfo"`
+		OriginalTitle string   `json:"original_title"`
+		Aka           []string `json:"aka"`
+	} `json:"meta"`
+}
+
+// stripDiacritics maps standard Latin-1 and advanced unicode diacritics to ASCII base characters
+func stripDiacritics(s string) string {
+	var replacer = strings.NewReplacer(
+		"ā", "a", "á", "a", "à", "a", "ä", "a", "â", "a", "ã", "a", "å", "a",
+		"ē", "e", "é", "e", "è", "e", "ë", "e", "ê", "e",
+		"ī", "i", "í", "i", "ì", "i", "ï", "i", "î", "i",
+		"ō", "o", "ó", "o", "ò", "o", "ö", "o", "ô", "o", "õ", "o", "ø", "o",
+		"ū", "u", "ú", "u", "ù", "u", "ü", "u", "û", "u",
+		"ý", "y", "ÿ", "y",
+		"ñ", "n", "ç", "c",
+		"Ā", "A", "Á", "A", "À", "A", "Ä", "A", "Â", "A", "Ã", "A", "Å", "A",
+		"Ē", "E", "É", "E", "È", "E", "Ë", "E", "Ê", "E",
+		"Ī", "I", "Í", "I", "Ì", "I", "Ï", "I", "Î", "I",
+		"Ō", "O", "Ó", "O", "Ò", "O", "Ö", "O", "Ô", "O", "Õ", "O", "Ø", "O",
+		"Ū", "U", "Ú", "U", "Ù", "U", "Ü", "U", "Û", "U",
+		"Ý", "Y", "Ñ", "N", "Ç", "C",
+	)
+	return replacer.Replace(s)
+}
+
+// injectNormalizedAltTitle adds the un-accented ASCII representation to AltTitles if it differs from the primary name
+func injectNormalizedAltTitle(res *MetaResult) {
+	if res == nil {
+		return
+	}
+	normalized := stripDiacritics(res.Name)
+	if normalized != res.Name {
+		isUnique := true
+		for _, existing := range res.AltTitles {
+			if existing == normalized {
+				isUnique = false
+				break
+			}
+		}
+		if isUnique {
+			res.AltTitles = append(res.AltTitles, normalized)
+		}
+	}
+}
+
+// executeWithRetry provides resilient, allocation-free execution for external API calls
+func executeWithRetry(ctx context.Context, fn func(context.Context) (*MetaResult, error)) (*MetaResult, error) {
+	res, err := fn(ctx)
+	if err != nil && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "deadline exceeded") || strings.Contains(err.Error(), "timeout")) {
+		// Attempt a single fast retry with a fresh context to avoid parent deadline exhaustion
+		retryCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return fn(retryCtx)
+	}
+	return res, err
 }
 
 func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
-	url := fmt.Sprintf("https://api.themoviedb.org/3/find/%s?api_key=%s&external_source=imdb_id", imdbID, config.TmdbAPIKey)
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := tmdbClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("tmdb status %d", resp.StatusCode)
-	}
-	var data map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-	var results []interface{}
-	if typ == "series" {
-		results, _ = data["tv_results"].([]interface{})
-	} else {
-		results, _ = data["movie_results"].([]interface{})
-	}
-	if len(results) == 0 {
-		return nil, fmt.Errorf("not found")
-	}
-	item := results[0].(map[string]interface{})
-	name := ""
-	if typ == "series" {
-		name, _ = item["name"].(string)
-	} else {
-		name, _ = item["title"].(string)
-	}
-	var year string
-	if typ == "series" {
-		if fad, ok := item["first_air_date"].(string); ok && len(fad) >= 4 {
-			year = fad[:4]
+	return executeWithRetry(ctx, func(reqCtx context.Context) (*MetaResult, error) {
+		url := fmt.Sprintf("https://api.themoviedb.org/3/find/%s?api_key=%s&external_source=imdb_id", imdbID, config.TmdbAPIKey)
+		req, _ := http.NewRequestWithContext(reqCtx, "GET", url, nil)
+		resp, err := tmdbClient.Do(req)
+		if err != nil {
+			return nil, err
 		}
-	} else {
-		if rd, ok := item["release_date"].(string); ok && len(rd) >= 4 {
-			year = rd[:4]
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("tmdb status %d", resp.StatusCode)
 		}
-	}
-	return &MetaResult{Name: name, Year: year, Source: "TMDB"}, nil
+
+		var data tmdbFindResponse
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			return nil, err
+		}
+
+		name, year := "", ""
+		var altTitles []string
+		if typ == "series" {
+			if len(data.TvResults) == 0 {
+				return nil, fmt.Errorf("not found")
+			}
+			item := data.TvResults[0]
+			name = item.Name
+			if len(item.FirstAirDate) >= 4 {
+				year = item.FirstAirDate[:4]
+			}
+			if item.OriginalName != "" && item.OriginalName != name {
+				altTitles = append(altTitles, item.OriginalName)
+			}
+		} else {
+			if len(data.MovieResults) == 0 {
+				return nil, fmt.Errorf("not found")
+			}
+			item := data.MovieResults[0]
+			name = item.Title
+			if len(item.ReleaseDate) >= 4 {
+				year = item.ReleaseDate[:4]
+			}
+			if item.OriginalTitle != "" && item.OriginalTitle != name {
+				altTitles = append(altTitles, item.OriginalTitle)
+			}
+		}
+
+		return &MetaResult{Name: name, Year: year, Source: "TMDB", AltTitles: altTitles}, nil
+	})
 }
 
 func fetchCinemeta(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
-	url := fmt.Sprintf("https://v3-cinemeta.strem.io/meta/%s/%s.json", typ, imdbID)
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := cinemetaClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("cinemeta status %d", resp.StatusCode)
-	}
-	var data map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-	meta, ok := data["meta"].(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("not found")
-	}
-	name, _ := meta["name"].(string)
-	yearStr := ""
-	if y, ok := meta["year"].(string); ok {
-		yearStr = y
-	} else if ri, ok := meta["releaseInfo"].(string); ok {
-		yearStr = ri
-	}
-	match := yearRegexp.FindString(yearStr)
-	return &MetaResult{Name: name, Year: match, Source: "Cinemeta"}, nil
+	return executeWithRetry(ctx, func(reqCtx context.Context) (*MetaResult, error) {
+		url := fmt.Sprintf("https://v3-cinemeta.strem.io/meta/%s/%s.json", typ, imdbID)
+		req, _ := http.NewRequestWithContext(reqCtx, "GET", url, nil)
+		resp, err := cinemetaClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("cinemeta status %d", resp.StatusCode)
+		}
+
+		var data cinemetaMetaResponse
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			return nil, err
+		}
+
+		meta := data.Meta
+		if meta.Name == "" {
+			return nil, fmt.Errorf("not found")
+		}
+
+		yearStr := meta.Year
+		if yearStr == "" {
+			yearStr = meta.ReleaseInfo
+		}
+		match := yearRegexp.FindString(yearStr)
+
+		var altTitles []string
+		if meta.OriginalTitle != "" && meta.OriginalTitle != meta.Name {
+			altTitles = append(altTitles, meta.OriginalTitle)
+		}
+		for _, aka := range meta.Aka {
+			if aka != "" && aka != meta.Name {
+				isUnique := true
+				for _, existing := range altTitles {
+					if existing == aka {
+						isUnique = false
+						break
+					}
+				}
+				if isUnique {
+					altTitles = append(altTitles, aka)
+				}
+			}
+		}
+
+		return &MetaResult{Name: meta.Name, Year: match, Source: "Cinemeta", AltTitles: altTitles}, nil
+	})
 }
 
 func fetchOmdb(ctx context.Context, imdbID string) (*MetaResult, error) {
 	if omdbClient == nil {
 		return nil, fmt.Errorf("omdb not configured")
 	}
-	url := fmt.Sprintf("http://www.omdbapi.com/?apikey=%s&i=%s", config.OmdbAPIKey, imdbID)
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := omdbClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var data map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-	if respStr, ok := data["Response"].(string); ok && respStr == "False" {
-		return nil, fmt.Errorf("omdb not found")
-	}
-	name, _ := data["Title"].(string)
-	year, _ := data["Year"].(string)
-	if year != "" {
-		year = strings.Split(year, "–")[0]
-	}
-	return &MetaResult{Name: name, Year: year, Source: "OMDb"}, nil
+	return executeWithRetry(ctx, func(reqCtx context.Context) (*MetaResult, error) {
+		url := fmt.Sprintf("http://www.omdbapi.com/?apikey=%s&i=%s", config.OmdbAPIKey, imdbID)
+		req, _ := http.NewRequestWithContext(reqCtx, "GET", url, nil)
+		resp, err := omdbClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+
+		var data struct {
+			Response string `json:"Response"`
+			Title    string `json:"Title"`
+			Year     string `json:"Year"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			return nil, err
+		}
+		if data.Response == "False" {
+			return nil, fmt.Errorf("omdb not found")
+		}
+
+		year := data.Year
+		if year != "" {
+			year = strings.Split(year, "–")[0]
+		}
+		return &MetaResult{Name: data.Title, Year: year, Source: "OMDb", AltTitles: nil}, nil
+	})
 }
 
 func fetchTrakt(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 	if traktClient == nil {
 		return nil, fmt.Errorf("trakt not configured")
 	}
-	searchType := "show"
-	if typ != "series" {
-		searchType = "movie"
-	}
-	url := fmt.Sprintf("https://api.trakt.tv/search/imdb/%s?type=%s", imdbID, searchType)
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("trakt-api-version", "2")
-	req.Header.Set("trakt-api-key", config.TraktClientID)
-	resp, err := traktClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("trakt status %d", resp.StatusCode)
-	}
-	var data []map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-	if len(data) == 0 {
-		return nil, fmt.Errorf("not found")
-	}
-	item := data[0][searchType].(map[string]interface{})
-	name, _ := item["title"].(string)
-	var year string
-	if y, ok := item["year"].(float64); ok {
-		year = fmt.Sprintf("%.0f", y)
-	}
-	return &MetaResult{Name: name, Year: year, Source: "Trakt"}, nil
+	return executeWithRetry(ctx, func(reqCtx context.Context) (*MetaResult, error) {
+		searchType := "show"
+		if typ != "series" {
+			searchType = "movie"
+		}
+		url := fmt.Sprintf("https://api.trakt.tv/search/imdb/%s?type=%s", imdbID, searchType)
+		req, _ := http.NewRequestWithContext(reqCtx, "GET", url, nil)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("trakt-api-version", "2")
+		req.Header.Set("trakt-api-key", config.TraktClientID)
+		resp, err := traktClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("trakt status %d", resp.StatusCode)
+		}
+
+		var data []struct {
+			Movie map[string]interface{} `json:"movie"`
+			Show  map[string]interface{} `json:"show"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			return nil, err
+		}
+		if len(data) == 0 {
+			return nil, fmt.Errorf("not found")
+		}
+
+		item := data[0].Movie
+		if typ == "series" {
+			item = data[0].Show
+		}
+
+		name, _ := item["title"].(string)
+		var year string
+		if y, ok := item["year"].(float64); ok {
+			year = fmt.Sprintf("%.0f", y)
+		}
+		return &MetaResult{Name: name, Year: year, Source: "Trakt", AltTitles: nil}, nil
+	})
 }
 
 func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
@@ -190,57 +314,38 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 	tmdbChan := make(chan *MetaResult, 1)
 	cinemetaChan := make(chan *MetaResult, 1)
 
-	go func() {
-		res, err := fetchTmdb(raceCtx, imdbID, typ)
-		if err != nil {
-			// Suppress expected context-canceled warnings caused by racing early-exit
-			if !errors.Is(err, context.Canceled) {
-				utils.Logger.Warn("TMDB failed", "error", err)
-			}
-			tmdbChan <- nil
-			return
-		}
-		tmdbChan <- res
-	}()
-
-	go func() {
-		res, err := fetchCinemeta(raceCtx, imdbID, typ)
-		if err != nil {
-			// Suppress expected context-canceled warnings caused by racing early-exit
-			if !errors.Is(err, context.Canceled) {
-				utils.Logger.Warn("Cinemeta failed", "error", err)
-			}
-			cinemetaChan <- nil
-			return
-		}
-		cinemetaChan <- res
-	}()
+	go func() { tmdbChan <- func() *MetaResult { r, _ := fetchTmdb(raceCtx, imdbID, typ); return r }() }()
+	go func() { cinemetaChan <- func() *MetaResult { r, _ := fetchCinemeta(raceCtx, imdbID, typ); return r }() }()
 
 	var tmdbRes, cinemetaRes *MetaResult
 
 	select {
 	case tmdbRes = <-tmdbChan:
 		if tmdbRes != nil {
-			cancel() // Abort Cinemeta connection immediately
+			cancel()
 			utils.Logger.Debug("resolved via TMDB (early-exit)", "name", tmdbRes.Name)
+			injectNormalizedAltTitle(tmdbRes)
 			metaCache.Set(cacheKey, tmdbRes)
 			return tmdbRes, nil
 		}
 		cinemetaRes = <-cinemetaChan
 		if cinemetaRes != nil {
+			injectNormalizedAltTitle(cinemetaRes)
 			metaCache.Set(cacheKey, cinemetaRes)
 			return cinemetaRes, nil
 		}
 	case cinemetaRes = <-cinemetaChan:
 		if cinemetaRes != nil {
-			cancel() // Abort TMDB connection immediately
+			cancel()
 			utils.Logger.Info("resolved via Cinemeta (early-exit)", "name", cinemetaRes.Name)
+			injectNormalizedAltTitle(cinemetaRes)
 			metaCache.Set(cacheKey, cinemetaRes)
 			return cinemetaRes, nil
 		}
 		tmdbRes = <-tmdbChan
 		if tmdbRes != nil {
-			metaCache.Set(cacheKey, tmdbRes) // Corrected from .Store to .Set
+			injectNormalizedAltTitle(tmdbRes)
+			metaCache.Set(cacheKey, tmdbRes)
 			return tmdbRes, nil
 		}
 	case <-ctx.Done():
@@ -252,23 +357,19 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 		g2, ctx2 := errgroup.WithContext(ctx)
 		var omdbRes, traktRes *MetaResult
 		if omdbClient != nil {
-			g2.Go(func() error {
-				omdbRes, _ = fetchOmdb(ctx2, imdbID)
-				return nil
-			})
+			g2.Go(func() error { omdbRes, _ = fetchOmdb(ctx2, imdbID); return nil })
 		}
 		if traktClient != nil {
-			g2.Go(func() error {
-				traktRes, _ = fetchTrakt(ctx2, imdbID, typ)
-				return nil
-			})
+			g2.Go(func() error { traktRes, _ = fetchTrakt(ctx2, imdbID, typ); return nil })
 		}
 		_ = g2.Wait()
 		if omdbRes != nil {
+			injectNormalizedAltTitle(omdbRes)
 			metaCache.Set(cacheKey, omdbRes)
 			return omdbRes, nil
 		}
 		if traktRes != nil {
+			injectNormalizedAltTitle(traktRes)
 			metaCache.Set(cacheKey, traktRes)
 			return traktRes, nil
 		}

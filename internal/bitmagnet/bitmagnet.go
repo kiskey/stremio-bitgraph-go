@@ -53,14 +53,15 @@ query TorrentFiles($input: TorrentFilesQueryInput!) {
   }
 }`
 
-type graphQLResponse struct {
+// 100% Single-Pass generic GraphQL Response Envelope
+type gqlEnvelope[T any] struct {
 	Errors []struct {
 		Message string `json:"message"`
 	} `json:"errors"`
-	Data json.RawMessage `json:"data"`
+	Data T `json:"data"`
 }
 
-func queryGraphQLDirect(ctx context.Context, query string, variables map[string]interface{}, dest interface{}) error {
+func queryGraphQLGeneric[T any](ctx context.Context, query string, variables map[string]interface{}, dest *T) error {
 	body := map[string]interface{}{"query": query, "variables": variables}
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, "POST", config.BitmagnetGQLEndpoint, bytes.NewReader(b))
@@ -74,24 +75,20 @@ func queryGraphQLDirect(ctx context.Context, query string, variables map[string]
 	}
 	defer resp.Body.Close()
 
-	var gqlResp graphQLResponse
-	if err := json.NewDecoder(resp.Body).Decode(&gqlResp); err != nil {
+	var envelope gqlEnvelope[T]
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return err
 	}
 
-	if len(gqlResp.Errors) > 0 {
-		msgs := make([]string, 0, len(gqlResp.Errors))
-		for _, e := range gqlResp.Errors {
+	if len(envelope.Errors) > 0 {
+		msgs := make([]string, 0, len(envelope.Errors))
+		for _, e := range envelope.Errors {
 			msgs = append(msgs, e.Message)
 		}
 		return fmt.Errorf("graphql errors: %s", strings.Join(msgs, ", "))
 	}
 
-	if len(gqlResp.Data) > 0 {
-		if err := json.Unmarshal(gqlResp.Data, dest); err != nil {
-			return err
-		}
-	}
+	*dest = envelope.Data
 	return nil
 }
 
@@ -120,18 +117,21 @@ type TorrentFile struct {
 }
 
 func SearchTorrents(ctx context.Context, searchString, contentType string, limit int) ([]TorrentItem, error) {
-	cleanQuery := strings.ReplaceAll(searchString, `\`, "")
-	cleanQuery = strings.ReplaceAll(cleanQuery, `"`, "")
+	// Diagnostic logger for verifying compiled exact-phrase, FTS OR-unions, and negation query execution
+	utils.Logger.Debug("executing bitmagnet search query", "query", searchString, "content_type", contentType, "limit", limit)
+
+	// We omit "orderBy" entirely from the query variables. 
+	// When "queryString" is provided, Bitmagnet natively defaults to sorting by "relevance" descending.
+	// Omitting it entirely avoids the complex GORM subquery pagination bug that generates the invalid "_order_1" column reference.
 	variables := map[string]interface{}{
 		"input": map[string]interface{}{
-			"queryString": cleanQuery,
+			"queryString": searchString,
 			"limit":       limit,
-			"orderBy": []map[string]interface{}{
-				{"field": "published_at", "descending": true},
-				{"field": "seeders", "descending": true},
-			},
 			"facets": map[string]interface{}{
 				"contentType": map[string]interface{}{"filter": []string{contentType}},
+				"torrentFileType": map[string]interface{}{
+					"filter": []string{"video"}, // Enforce server-side video filtering only
+				},
 			},
 		},
 	}
@@ -145,7 +145,7 @@ func SearchTorrents(ctx context.Context, searchString, contentType string, limit
 	}
 
 	var data searchData
-	err := queryGraphQLDirect(ctx, torrentContentSearchQuery, variables, &data)
+	err := queryGraphQLGeneric(ctx, torrentContentSearchQuery, variables, &data)
 	if err != nil {
 		utils.Logger.Error("bitmagnet search failed", "error", err)
 		return nil, err
@@ -171,7 +171,7 @@ func GetTorrentFiles(ctx context.Context, infoHash string) ([]TorrentFile, error
 	}
 
 	var data filesData
-	err := queryGraphQLDirect(ctx, torrentFilesQuery, variables, &data)
+	err := queryGraphQLGeneric(ctx, torrentFilesQuery, variables, &data)
 	if err != nil {
 		return nil, err
 	}

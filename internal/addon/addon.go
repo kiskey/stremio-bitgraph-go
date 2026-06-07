@@ -49,6 +49,9 @@ type Stream struct {
 
 var searchCache = utils.NewTTLCache(5 * time.Minute)
 
+// Compile-time optimized replacement string structure
+var queryReplacer = strings.NewReplacer("\\", "", "\"", "")
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -83,6 +86,43 @@ func manifestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(m)
+}
+
+func buildOptimizedQuery(name string, altTitles []string, suffix string) string {
+	nameClean := queryReplacer.Replace(name)
+
+	var terms []string
+	terms = append(terms, fmt.Sprintf(`"%s"`, nameClean))
+
+	for _, alt := range altTitles {
+		altClean := queryReplacer.Replace(alt)
+		if altClean != "" && altClean != nameClean {
+			terms = append(terms, fmt.Sprintf(`"%s"`, altClean))
+		}
+	}
+
+	var query string
+	if len(terms) > 1 {
+		query = fmt.Sprintf("(%s)", strings.Join(terms, " | "))
+	} else {
+		query = terms[0]
+	}
+
+	if suffix != "" {
+		suffixClean := queryReplacer.Replace(suffix)
+		query = fmt.Sprintf("%s %s", query, suffixClean)
+	}
+
+	// Append FTS Negation Keywords dynamically on-demand
+	if len(config.NegateKeywords) > 0 {
+		var negations []string
+		for _, k := range config.NegateKeywords {
+			negations = append(negations, fmt.Sprintf("!%s", queryReplacer.Replace(k)))
+		}
+		query = fmt.Sprintf("%s %s", query, strings.Join(negations, " "))
+	}
+
+	return query
 }
 
 func streamHandler(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +176,8 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				torrents = cachedVal.([]bitmagnet.TorrentItem)
 				return
 			}
-			torrents, searchErr = bitmagnet.SearchTorrents(ctx, meta.Name, contentType, 100)
+			query := buildOptimizedQuery(meta.Name, meta.AltTitles, meta.Year)
+			torrents, searchErr = bitmagnet.SearchTorrents(ctx, query, contentType, 100)
 			if searchErr == nil && len(torrents) > 0 {
 				searchCache.Set(searchCacheKey, torrents)
 			}
@@ -174,7 +215,6 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// Series: skip initial search, only fetch DB cache
 		if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
 			rows, _ := db.Pool.Query(ctx,
 				"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
@@ -210,31 +250,33 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			sPadded = fmt.Sprintf("S%d", sVal)
 		}
 
-		// Parallel fetch of Refined and Broad query sets
 		var refinedTorrents, broadTorrents []bitmagnet.TorrentItem
 		g, gCtx := errgroup.WithContext(ctx)
 
 		g.Go(func() error {
-			refinedQuery := fmt.Sprintf("%s %s", meta.Name, sPadded)
+			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, sPadded)
 			var innerErr error
 			refinedTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, refinedQuery, "tv_show", 50)
 			return innerErr
 		})
 
 		g.Go(func() error {
+			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, "")
 			var innerErr error
-			broadTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, meta.Name, "tv_show", 100)
+			broadTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, broadQuery, "tv_show", 100)
 			return innerErr
 		})
 
 		_ = g.Wait()
 
-		refinedResult, refinedCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, season, episode, refinedTorrents, cachedRows, config.PreferredLanguages)
+		// Pass the retrieved primary title & its compiled alternate titles list to the matcher.
+		// We use PublishedAt inside TorrentItem as a zero-allocation vector to pass the premiere year.
+		refinedResult, refinedCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, meta.AltTitles, season, episode, refinedTorrents, cachedRows, config.PreferredLanguages)
 		resultStreams = refinedResult
 		cachedStreams = refinedCached
 
 		if len(refinedTorrents) < 10 || len(resultStreams) == 0 {
-			broadResult, broadCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, season, episode, broadTorrents, cachedRows, config.PreferredLanguages)
+			broadResult, broadCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, meta.AltTitles, season, episode, broadTorrents, cachedRows, config.PreferredLanguages)
 			existing := make(map[string]bool)
 			for _, s := range resultStreams {
 				existing[s.InfoHash] = true
@@ -257,7 +299,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		movieResult, movieCached := matcher.FindBestMovieStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, meta.Year, torrents, cachedRows, config.PreferredLanguages)
+		movieResult, movieCached := matcher.FindBestMovieStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, meta.AltTitles, meta.Year, torrents, cachedRows, config.PreferredLanguages)
 		resultStreams = movieResult
 		cachedStreams = movieCached
 	}
@@ -306,7 +348,6 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fix missing fileIndex for P2P movies concurrently
 	if !provider.IsEnabled() {
 		torrentMap := make(map[string]bitmagnet.TorrentItem)
 		var multiHashes []string

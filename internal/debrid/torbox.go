@@ -148,15 +148,6 @@ func extractInfoHash(magnet string) string {
 
 func (t *torboxProvider) checkRateLimit() bool {
 	t.mu.Lock()
-	for _, ts := range t.addTimestamps {
-		if ts.After(time.Now().Add(-60 * time.Second)) {
-			t.addTimestamps = append(t.addTimestamps, ts)
-		}
-	}
-	t.addTimestamps = t.addTimestamps[:0]
-	t.mu.Unlock()
-
-	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
 	cutoff := now.Add(-60 * time.Second)
@@ -237,43 +228,56 @@ func (t *torboxProvider) AddMagnet(ctx context.Context, magnet string) (*AddResu
 	writer.Close()
 
 	var lastErr error
+	var resolvedResult *AddResult
+
 	for attempt := 0; attempt < 3; attempt++ {
 		resp, err := t.do(ctx, "POST", "/torrents/createtorrent", &body, writer.FormDataContentType())
 		if err != nil {
 			lastErr = err
 			break
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			lastErr = fmt.Errorf("createtorrent status %d", resp.StatusCode)
-			break
-		}
-		var data TorboxCreateResponse
-		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+
+		// Encapsulate response processing inside a self-contained anonymous closure.
+		// This guarantees `defer resp.Body.Close()` is evaluated and executed
+		// immediately at the end of each loop iteration, preventing connection leaks.
+		err = func() error {
+			defer resp.Body.Close()
+
+			var data TorboxCreateResponse
+			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+				return err
+			}
+
+			torrentID := data.Data.TorrentID.String()
+			if torrentID == "" || torrentID == "0" {
+				torrentID = data.Data.ID.String()
+			}
+			hashRet := data.Data.Hash
+			name := data.Data.Name
+
+			isCached := false
+			if strings.Contains(strings.ToLower(data.Detail), "cached torrent") {
+				isCached = true
+			}
+			if torrentID != "" && hashRet != "" {
+				t.mu.Lock()
+				t.recentIDs[hash] = torrentID
+				t.recentIDs[strings.ToLower(hashRet)] = torrentID
+				t.mu.Unlock()
+
+				resolvedResult = &AddResult{ID: torrentID, Hash: hashRet, Name: name, Cached: isCached}
+				return nil
+			}
+			return fmt.Errorf("addMagnet response missing id/hash")
+		}()
+
+		if err != nil {
 			lastErr = err
-			break
+			continue // Proceed to retry
 		}
-
-		torrentID := data.Data.TorrentID.String()
-		if torrentID == "" || torrentID == "0" {
-			torrentID = data.Data.ID.String()
+		if resolvedResult != nil {
+			return resolvedResult, nil
 		}
-		hashRet := data.Data.Hash
-		name := data.Data.Name
-
-		isCached := false
-		if strings.Contains(strings.ToLower(data.Detail), "cached torrent") {
-			isCached = true
-		}
-		if torrentID != "" && hashRet != "" {
-			t.mu.Lock()
-			t.recentIDs[hash] = torrentID
-			t.recentIDs[strings.ToLower(hashRet)] = torrentID
-			t.mu.Unlock()
-			return &AddResult{ID: torrentID, Hash: hashRet, Name: name, Cached: isCached}, nil
-		}
-		lastErr = fmt.Errorf("addMagnet response missing id/hash")
-		break
 	}
 	return nil, lastErr
 }

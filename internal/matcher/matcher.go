@@ -3,6 +3,7 @@ package matcher
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -29,6 +30,14 @@ type Stream struct {
 	IsCached    bool
 }
 
+// Static Low-Entropy Grammatical Stop Words Set for PN-SILEC Filtering
+var stopWords = map[string]bool{
+	"the": true, "a": true, "an": true, "and": true, "or": true,
+	"of": true, "in": true, "on": true, "at": true, "to": true,
+	"for": true, "with": true, "by": true, "from": true, "aka": true,
+	"la": true, "le": true, "les": true, "el": true, "un": true, "une": true,
+}
+
 // metadataWords are technical tags that should not trigger the single-word guardrail.
 // These are common torrent metadata tokens that appear after the actual movie title.
 var metadataWords = map[string]bool{
@@ -51,6 +60,9 @@ var metadataWords = map[string]bool{
 	"51": true, "71": true, "20": true, "10bit": true, "remux": true,
 	"3d": true, "sdr": true, "gb": true, "mb": true, "kb": true,
 	"web": true, "dl": true, "hd": true,
+	"complete": true, "repack": true, "proper": true, "vostfr": true,
+	"subs":     true, "sub": true, "esub": true, "vof": true, "vff": true,
+	"vf":       true, "season": true, "series": true, "episode": true, "pack": true,
 }
 
 // sequelIndicators are words that strongly suggest a different franchise entry.
@@ -111,6 +123,8 @@ var ignoredNumbers = map[string]bool{
 	"576": true, "264": true, "265": true, "10": true, "8": true,
 }
 
+var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to)\s*0*(\d+)\b`)
+
 // isBlockedArchive checks if a torrent name is a compressed archive that Stremio cannot play
 func isBlockedArchive(name string) bool {
 	lower := strings.ToLower(name)
@@ -151,6 +165,62 @@ func cleanWord(w string) string {
 	}, strings.ToLower(w))
 }
 
+// isTechnicalToken performs an allocation-free dynamic check to identify season, episode,
+// and pack-specific serialization tokens, allowing them to safely bypass the guardrail.
+func isTechnicalToken(s string) bool {
+	// 1. Direct O(1) Map Lookups
+	if metadataWords[s] || stopWords[s] {
+		return true
+	}
+
+	// 2. Standalone Number Check (e.g. "1", "01")
+	if isNumber(s) {
+		return true
+	}
+
+	// 3. Dynamic Prefix + Number Parsing (Allocation-Free Slicing)
+	if len(s) >= 2 {
+		// "s1", "e1", "p1"
+		first := s[0]
+		if (first == 's' || first == 'e' || first == 'p') && isNumber(s[1:]) {
+			return true
+		}
+		// "se1", "ep1"
+		if len(s) >= 3 {
+			prefix2 := s[:2]
+			if (prefix2 == "se" || prefix2 == "ep") && isNumber(s[2:]) {
+				return true
+			}
+		}
+		// "epi1"
+		if len(s) >= 4 {
+			if s[:3] == "epi" && isNumber(s[3:]) {
+				return true
+			}
+		}
+		// "seas1", "part1"
+		if len(s) >= 5 {
+			prefix4 := s[:4]
+			if (prefix4 == "seas" || prefix4 == "part") && isNumber(s[4:]) {
+				return true
+			}
+		}
+		// "season1", "series1"
+		if len(s) >= 7 {
+			if s[:6] == "season" && isNumber(s[6:]) {
+				return true
+			}
+		}
+		// "episode1"
+		if len(s) >= 8 {
+			if s[:7] == "episode" && isNumber(s[7:]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // passTitleGuardrail prevents single-word titles (e.g. "Up", "It") from matching
 // unrelated multi-word torrents (e.g. "Upgraded", "Italian"). It allows metadata
 // words (codecs, quality tags, languages) to pass through.
@@ -169,22 +239,60 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 	}
 
 	targetWords := strings.Fields(targetNoArt)
-	// Apply guardrail only if target title is a single word
+	parsedWords := strings.Fields(parsedNoArt)
+
+	// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail ──
+	if len(targetWords) > 1 && len(parsedWords) > len(targetWords) {
+		// Verify if the parsed title starts with the target phrase
+		startsSame := true
+		for i := 0; i < len(targetWords); i++ {
+			if cleanWord(parsedWords[i]) != cleanWord(targetWords[i]) {
+				startsSame = false
+				break
+			}
+		}
+
+		if startsSame {
+			// Extract the extra trailing tokens (P \ T)
+			extraWords := parsedWords[len(targetWords):]
+			hasSubstantiveProperNoun := false
+			for _, w := range extraWords {
+				cw := cleanWord(w)
+				if cw == "" {
+					continue
+				}
+				// If the extra word is NOT a stop word and NOT a technical metadata word/pattern,
+				// we flag it as an unauthorizedProperNoun (indicating a different show entity).
+				if !isTechnicalToken(cw) {
+					hasSubstantiveProperNoun = true
+					break
+				}
+			}
+			if hasSubstantiveProperNoun {
+				return false // ❌ REJECTED (Substantive Proper-Noun Detected)
+			}
+		}
+	}
+
+	// ── Standard Single-Word Title Guardrail (Preserved & Fine-Tuned) ──
 	if len(targetWords) == 1 {
 		singleWord := cleanWord(targetWords[0])
-		parsedWords := strings.Fields(parsedNoArt)
-
 		if len(parsedWords) > 1 {
+			firstWord := cleanWord(parsedWords[0])
+			if firstWord == singleWord {
+				return true
+			}
+
 			hasExtraNonMeta := false
 			for _, w := range parsedWords {
 				cw := cleanWord(w)
-				if cw != "" && cw != singleWord && !metadataWords[cw] {
+				if cw != "" && cw != singleWord && !isTechnicalToken(cw) {
 					hasExtraNonMeta = true
 					break
 				}
 			}
 			if hasExtraNonMeta {
-				return false
+				return false // ❌ REJECTED
 			}
 		}
 	}
@@ -549,7 +657,7 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 	return result
 }
 
-func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, altTitles []string, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
 	for _, torrent := range cachedRows {
 		if findFileInTorrentInfo(torrent, season, episode) {
 			infoHash, _ := torrent["infohash"].(string)
@@ -629,14 +737,38 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 			default:
 			}
 
-			sim := getTitleSimilarity(tmdbShow.Title, td.Name)
-			utils.Logger.Debug("evaluating series torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
-			if sim < config.SimilarityThreshold {
+			// Find the title (primary or alternate) that actually matched
+			matchingTitle := ""
+			bestSim := getTitleSimilarity(tmdbShow.Title, td.Name)
+			if bestSim >= config.SimilarityThreshold {
+				matchingTitle = tmdbShow.Title
+			}
+			for _, alt := range altTitles {
+				if s := getTitleSimilarity(alt, td.Name); s > bestSim {
+					bestSim = s
+					if s >= config.SimilarityThreshold {
+						matchingTitle = alt
+					}
+				}
+			}
+
+			if bestSim < config.SimilarityThreshold || matchingTitle == "" {
 				return nil
 			}
 
-			bestLang := getBestLanguage(t.Languages, preferredLanguages)
+			// SPEBC: Block older remakes by checking if the torrent year is older than the premiere year
 			parsed := parser.RobustParseInfo(td.Name, 0)
+			if parsed.Year != 0 && tmdbShow.PublishedAt != "" {
+				premiereY, err := strconv.Atoi(tmdbShow.PublishedAt)
+				if err == nil {
+					if parsed.Year < premiereY-1 {
+						utils.Logger.Debug("filtering out series torrent: failed earliest premiere year check", "torrent_year", parsed.Year, "premiere_year", premiereY)
+						return nil
+					}
+				}
+			}
+
+			bestLang := getBestLanguage(t.Languages, preferredLanguages)
 			if bestLang == "en" && parsed.Language != "en" && parsed.Language != "" {
 				bestLang = parsed.Language
 			}
@@ -645,12 +777,26 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 				quality = parsed.Quality
 			}
 
+			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Series) ──
+			if !passTitleGuardrail(matchingTitle, parsed.Title) {
+				utils.Logger.Debug("filtering out series torrent: failed title guardrail", "target", matchingTitle, "parsed", parsed.Title)
+				return nil
+			}
+
+			// CSRC Range Check: Overrides strict season matching if a multi-season range is detected
+			isMultiSeasonPack := false
+			if matches := seasonRangeRegex.FindStringSubmatch(td.Name); len(matches) >= 3 {
+				startS, _ := strconv.Atoi(matches[1])
+				endS, _ := strconv.Atoi(matches[2])
+				if season >= startS && season <= endS {
+					isMultiSeasonPack = true
+				}
+			}
+
 			var local []Stream
 
-			if parsed.Season == season {
+			if parsed.Season == season || isMultiSeasonPack {
 				if td.FilesStatus == "single" {
-					// Guardrail: A single-file torrent can only be returned if its parsed episode
-					// matches the requested episode, or if it does not explicitly specify a different episode.
 					if parsed.Episode != 0 && parsed.Episode != episode {
 						return nil
 					}
@@ -713,7 +859,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 	return streams, cachedStreams
 }
 
-func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, altTitles []string, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
 	for _, torrent := range cachedRows {
 		infoHash, _ := torrent["infohash"].(string)
 		lang, _ := torrent["language"].(string)
@@ -791,16 +937,30 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			default:
 			}
 
-			sim := getTitleSimilarity(tmdbMovie.Title, td.Name)
-			utils.Logger.Debug("evaluating movie torrent", "name", td.Name, "similarity", fmt.Sprintf("%.2f", sim))
-			if sim < config.SimilarityThreshold {
+			// Find the title (primary or alternate) that actually matched
+			matchingTitle := ""
+			bestSim := getTitleSimilarity(tmdbMovie.Title, td.Name)
+			if bestSim >= config.SimilarityThreshold {
+				matchingTitle = tmdbMovie.Title
+			}
+			for _, alt := range altTitles {
+				if s := getTitleSimilarity(alt, td.Name); s > bestSim {
+					bestSim = s
+					if s >= config.SimilarityThreshold {
+						matchingTitle = alt
+					}
+				}
+			}
+
+			if bestSim < config.SimilarityThreshold || matchingTitle == "" {
 				return nil
 			}
 
 			parsed := parser.RobustParseInfo(td.Name, 0)
 
-			if !passTitleGuardrail(tmdbMovie.Title, parsed.Title) {
-				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", tmdbMovie.Title, "parsed", parsed.Title)
+			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Movie) ──
+			if !passTitleGuardrail(matchingTitle, parsed.Title) {
+				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", matchingTitle, "parsed", parsed.Title)
 				return nil
 			}
 
@@ -808,7 +968,6 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			if parsed.Year != 0 && tmdbYear != "" {
 				y, err := strconv.Atoi(tmdbYear)
 				if err == nil {
-					// Apply standard +/- 1 margin for all releases including post-2020 films
 					if parsed.Year < y-1 || parsed.Year > y+1 {
 						yearMatch = false
 					}
