@@ -141,10 +141,13 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 	utils.Logger.Info("stream request", "type", typ, "id", id, "decoded_id", idDecoded)
 
 	var imdbID, seasonStr, episodeStr string
+	var season, episode int
 	if typ == "series" {
 		parts := strings.Split(idDecoded, ":")
 		if len(parts) >= 3 {
 			imdbID, seasonStr, episodeStr = parts[0], parts[1], parts[2]
+			season, _ = strconv.Atoi(seasonStr)
+			episode, _ = strconv.Atoi(episodeStr)
 		}
 	} else {
 		imdbID = idDecoded
@@ -244,8 +247,6 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 
 	var resultStreams, cachedStreams []matcher.Stream
 	if typ == "series" {
-		season, _ := strconv.Atoi(seasonStr)
-		episode, _ := strconv.Atoi(episodeStr)
 		sVal := season
 		var sPadded string
 		if sVal < 10 {
@@ -420,10 +421,38 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			if s.IsCached {
 				prefix = "⚡"
 			}
+			providerLabel := "RD"
+			if config.DebridProvider == "torbox" {
+				providerLabel = "TB"
+			}
+
+			langFlag := strings.ToUpper(s.Language)
+			matchedBadges := FormatBadges(s.TorrentName)
+
+			// Formulate Stream Name (the button text)
+			streamName := fmt.Sprintf("[%s %s] %s | %s | %s", prefix, providerLabel, langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
+
+			// Formulate Stream Title (the description block)
+			var titleBuilder strings.Builder
+			if typ == "series" {
+				titleBuilder.WriteString(fmt.Sprintf("🎬 %s S%02dE%02d\n", meta.Name, season, episode))
+			} else {
+				if meta.Year != "" {
+					titleBuilder.WriteString(fmt.Sprintf("🎬 %s (%s)\n", meta.Name, meta.Year))
+				} else {
+					titleBuilder.WriteString(fmt.Sprintf("🎬 %s\n", meta.Name))
+				}
+			}
+			titleBuilder.WriteString(fmt.Sprintf("📦 %s\n", s.TorrentName))
+			if matchedBadges != "" {
+				titleBuilder.WriteString(fmt.Sprintf("🏷️ %s\n", matchedBadges))
+			}
+			titleBuilder.WriteString(fmt.Sprintf("🗣️ %s | 💾 %s | 👤 %d seeders", langFlag, utils.FormatSize(s.Size), s.Seeders))
+
 			url := fmt.Sprintf("%s/%s/stream/%s/%s/%s", config.AppHost, config.AddonID, typ, id, s.InfoHash)
 			streams = append(streams, Stream{
-				Name:  fmt.Sprintf("[%s RD] %s | %s", prefix, strings.ToUpper(s.Language), strings.ToUpper(s.Quality)),
-				Title: fmt.Sprintf("%s\n💾 %s | 👤 %d seeders", s.TorrentName, utils.FormatSize(s.Size), s.Seeders),
+				Name:  streamName,
+				Title: titleBuilder.String(),
 				URL:   url,
 			})
 		}
@@ -433,9 +462,33 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			if typ == "series" {
 				bh["bingeGroup"] = imdbID
 			}
+
+			langFlag := strings.ToUpper(s.Language)
+			matchedBadges := FormatBadges(s.TorrentName)
+
+			// Formulate Stream Name (the button text)
+			streamName := fmt.Sprintf("[🧲 P2P] %s | %s | %s", langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
+
+			// Formulate Stream Title (the description block)
+			var titleBuilder strings.Builder
+			if typ == "series" {
+				titleBuilder.WriteString(fmt.Sprintf("🎬 %s S%02dE%02d\n", meta.Name, season, episode))
+			} else {
+				if meta.Year != "" {
+					titleBuilder.WriteString(fmt.Sprintf("🎬 %s (%s)\n", meta.Name, meta.Year))
+				} else {
+					titleBuilder.WriteString(fmt.Sprintf("🎬 %s\n", meta.Name))
+				}
+			}
+			titleBuilder.WriteString(fmt.Sprintf("📦 %s\n", s.TorrentName))
+			if matchedBadges != "" {
+				titleBuilder.WriteString(fmt.Sprintf("🏷️ %s\n", matchedBadges))
+			}
+			titleBuilder.WriteString(fmt.Sprintf("🗣️ %s | 💾 %s | 👤 %d seeders", langFlag, utils.FormatSize(s.Size), s.Seeders))
+
 			streams = append(streams, Stream{
-				Name:          fmt.Sprintf("[Bitgraph P2P] %s | %s", strings.ToUpper(s.Language), strings.ToUpper(s.Quality)),
-				Title:         fmt.Sprintf("%s\n💾 %s | 👤 %d seeders", s.TorrentName, utils.FormatSize(s.Size), s.Seeders),
+				Name:          streamName,
+				Title:         titleBuilder.String(),
 				InfoHash:      s.InfoHash,
 				FileIdx:       s.FileIndex,
 				BehaviorHints: bh,
