@@ -18,6 +18,7 @@ import (
 	"github.com/user/stremio-bitgraph-go/internal/debrid"
 	"github.com/user/stremio-bitgraph-go/internal/matcher"
 	"github.com/user/stremio-bitgraph-go/internal/metadata"
+	"github.com/user/stremio-bitgraph-go/internal/parser"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -123,6 +124,18 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 	}
 
 	return query
+}
+
+// checkPackOrRange delegates token scanning strictly to the parsed domain layer (parser.go)
+func checkPackOrRange(name string, targetE int) string {
+	isPack, start, end, hasRange := parser.ParsePackOrRange(name, targetE)
+	if isPack {
+		return " (📦 Season Pack)"
+	}
+	if hasRange {
+		return fmt.Sprintf(" (🔢 Batch E%02d-%02d)", start, end)
+	}
+	return ""
 }
 
 func streamHandler(w http.ResponseWriter, r *http.Request) {
@@ -427,15 +440,16 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			langFlag := strings.ToUpper(s.Language)
-			matchedBadges := FormatBadges(s.TorrentName)
+			matchedBadges := parser.FormatBadges(s.TorrentName)
 
 			// Formulate Stream Name (the button text)
 			streamName := fmt.Sprintf("[%s %s] %s | %s | %s", prefix, providerLabel, langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
 
-			// Formulate Stream Title (the description block)
+			// Formulate Stream Title (the description block) with Option B de-cluttered layout
 			var titleBuilder strings.Builder
 			if typ == "series" {
-				titleBuilder.WriteString(fmt.Sprintf("🎬 %s S%02dE%02d\n", meta.Name, season, episode))
+				packOrRange := checkPackOrRange(s.TorrentName, episode)
+				titleBuilder.WriteString(fmt.Sprintf("📺 %s S%02dE%02d%s\n", meta.Name, season, episode, packOrRange))
 			} else {
 				if meta.Year != "" {
 					titleBuilder.WriteString(fmt.Sprintf("🎬 %s (%s)\n", meta.Name, meta.Year))
@@ -443,11 +457,10 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					titleBuilder.WriteString(fmt.Sprintf("🎬 %s\n", meta.Name))
 				}
 			}
-			titleBuilder.WriteString(fmt.Sprintf("📦 %s\n", s.TorrentName))
 			if matchedBadges != "" {
-				titleBuilder.WriteString(fmt.Sprintf("🏷️ %s\n", matchedBadges))
+				titleBuilder.WriteString(fmt.Sprintf("✨ %s\n", matchedBadges))
 			}
-			titleBuilder.WriteString(fmt.Sprintf("🗣️ %s | 💾 %s | 👤 %d seeders", langFlag, utils.FormatSize(s.Size), s.Seeders))
+			titleBuilder.WriteString(fmt.Sprintf("⚡ Peer Health: 👤 %d seeders", s.Seeders))
 
 			url := fmt.Sprintf("%s/%s/stream/%s/%s/%s", config.AppHost, config.AddonID, typ, id, s.InfoHash)
 			streams = append(streams, Stream{
@@ -464,15 +477,16 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			langFlag := strings.ToUpper(s.Language)
-			matchedBadges := FormatBadges(s.TorrentName)
+			matchedBadges := parser.FormatBadges(s.TorrentName)
 
 			// Formulate Stream Name (the button text)
 			streamName := fmt.Sprintf("[🧲 P2P] %s | %s | %s", langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
 
-			// Formulate Stream Title (the description block)
+			// Formulate Stream Title (the description block) with Option B de-cluttered layout
 			var titleBuilder strings.Builder
 			if typ == "series" {
-				titleBuilder.WriteString(fmt.Sprintf("🎬 %s S%02dE%02d\n", meta.Name, season, episode))
+				packOrRange := checkPackOrRange(s.TorrentName, episode)
+				titleBuilder.WriteString(fmt.Sprintf("📺 %s S%02dE%02d%s\n", meta.Name, season, episode, packOrRange))
 			} else {
 				if meta.Year != "" {
 					titleBuilder.WriteString(fmt.Sprintf("🎬 %s (%s)\n", meta.Name, meta.Year))
@@ -480,11 +494,10 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					titleBuilder.WriteString(fmt.Sprintf("🎬 %s\n", meta.Name))
 				}
 			}
-			titleBuilder.WriteString(fmt.Sprintf("📦 %s\n", s.TorrentName))
 			if matchedBadges != "" {
-				titleBuilder.WriteString(fmt.Sprintf("🏷️ %s\n", matchedBadges))
+				titleBuilder.WriteString(fmt.Sprintf("✨ %s\n", matchedBadges))
 			}
-			titleBuilder.WriteString(fmt.Sprintf("🗣️ %s | 💾 %s | 👤 %d seeders", langFlag, utils.FormatSize(s.Size), s.Seeders))
+			titleBuilder.WriteString(fmt.Sprintf("⚡ Peer Health: 👤 %d seeders", s.Seeders))
 
 			streams = append(streams, Stream{
 				Name:          streamName,
