@@ -75,6 +75,11 @@ var metadataWords = map[string]bool{
 	// Regional language/subtitle abbreviations & subdomain noise markers
 	"tam": true, "tel": true, "hin": true, "eng": true, "mal": true, "kan": true,
 	"msub": true, "tamilmv": true, "tamilblasters": true, "bolly4u": true, "torrent911": true,
+	// Extended regional country, dub, sub, and video format codes
+	"cz": true, "sk": true, "hu": true, "ro": true, "bg": true, "ua": true, "tr": true,
+	"th": true, "vi": true, "he": true, "fa": true, "soft": true, "hard": true,
+	"ntsc": true, "pal": true, "open": true, "matte": true, "unrated": true, "rated": true,
+	"dub": true, "dubbed": true, "subbed": true, "rosubbed": true, "nlsubs": true, "engsub": true,
 }
 
 // sequelIndicators are words that strongly suggest a different franchise entry.
@@ -288,7 +293,7 @@ func isTechnicalToken(s string) bool {
 // passTitleGuardrail prevents single-word titles (e.g. "Up", "It") from matching
 // unrelated multi-word torrents (e.g. "Upgraded", "Italian"). It allows metadata
 // words (codecs, quality tags, languages) to pass through.
-func passTitleGuardrail(targetTitle, parsedTitle string) bool {
+func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) bool {
 	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
 	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
 
@@ -316,6 +321,14 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 	targetWordSet := make(map[string]bool)
 	for _, w := range targetWords {
 		targetWordSet[cleanWord(w)] = true
+	}
+	for _, alt := range altTitles {
+		cleanAlt := strings.Trim(strings.ToLower(alt), " .-_[]()/\\")
+		cleanAlt = strings.ReplaceAll(cleanAlt, "-", " ")
+		altNoArt := stripLeadingArticles(cleanAlt)
+		for _, w := range strings.Fields(altNoArt) {
+			targetWordSet[cleanWord(w)] = true
+		}
 	}
 
 	hasUnrelatedSubstantiveWord := false
@@ -923,7 +936,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 			}
 
 			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Series) ──
-			if !passTitleGuardrail(matchingTitle, parsed.Title) {
+			if !passTitleGuardrail(matchingTitle, parsed.Title, altTitles) {
 				utils.Logger.Debug("filtering out series torrent: failed title guardrail", "target", matchingTitle, "parsed", parsed.Title)
 				return nil
 			}
@@ -1117,7 +1130,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			}
 
 			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Movie) ──
-			if !passTitleGuardrail(matchingTitle, parsed.Title) {
+			if !passTitleGuardrail(matchingTitle, parsed.Title, altTitles) {
 				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", matchingTitle, "parsed", parsed.Title)
 				return nil
 			}
