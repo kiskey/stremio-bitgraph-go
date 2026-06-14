@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,9 @@ var searchCache = utils.NewTTLCache(5 * time.Minute)
 
 // Compile-time optimized replacement string structure
 var queryReplacer = strings.NewReplacer("\\", "", "\"", "")
+
+// Pre-compiled global regular expression to prevent GC pressure and lookahead errors during live stream serving
+var rangeRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)?\s*(\d+)\s*(?:-|to)\s*(?:e|ep|episode)?\s*(\d+)\b`)
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -271,15 +275,19 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		var refinedTorrents, broadTorrents []bitmagnet.TorrentItem
 		g, gCtx := errgroup.WithContext(ctx)
 
+		// Refined Query: Combines target show title with the highly unique episode block (e.g. From S03E03)
+		// This bypasses PostgreSQL GIN/FTS stop-word deletion as the episode code is preserved natively.
 		g.Go(func() error {
-			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, sPadded)
+			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, fmt.Sprintf("%sE%02d", sPadded, episode))
 			var innerErr error
 			refinedTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, refinedQuery, "tv_show", 50)
 			return innerErr
 		})
 
+		// Broad Query: Combines target show title with the season block (e.g. From S03)
+		// Guarantees that complete season packs are returned even if the FTS strips the show's name.
 		g.Go(func() error {
-			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, "")
+			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, sPadded)
 			var innerErr error
 			broadTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, broadQuery, "tv_show", 100)
 			return innerErr
