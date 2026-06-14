@@ -96,21 +96,17 @@ func manifestHandler(w http.ResponseWriter, r *http.Request) {
 func buildOptimizedQuery(name string, altTitles []string, suffix string) string {
 	nameClean := queryReplacer.Replace(name)
 
-	var terms []string
-	terms = append(terms, fmt.Sprintf(`"%s"`, nameClean))
-
-	for _, alt := range altTitles {
-		altClean := queryReplacer.Replace(alt)
-		if altClean != "" && altClean != nameClean {
-			terms = append(terms, fmt.Sprintf(`"%s"`, altClean))
-		}
-	}
+	// Detect if the show name is a single word or short stop-word
+	isShortOrStopWord := len(strings.Fields(nameClean)) == 1
 
 	var query string
-	if len(terms) > 1 {
-		query = fmt.Sprintf("(%s)", strings.Join(terms, " | "))
+	if isShortOrStopWord {
+		// Do not wrap in double quotes, and do not append FTS negation operators.
+		// This forces Bitmagnet to fall back natively to its plain-text "search_string" matching,
+		// preventing the stop-word "From" from being completely erased.
+		query = nameClean
 	} else {
-		query = terms[0]
+		query = fmt.Sprintf(`"%s"`, nameClean)
 	}
 
 	if suffix != "" {
@@ -118,8 +114,8 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 		query = fmt.Sprintf("%s %s", query, suffixClean)
 	}
 
-	// Append FTS Negation Keywords dynamically on-demand
-	if len(config.NegateKeywords) > 0 {
+	// Append FTS Negation Keywords only for standard, non-stop-word titles
+	if !isShortOrStopWord && len(config.NegateKeywords) > 0 {
 		var negations []string
 		for _, k := range config.NegateKeywords {
 			negations = append(negations, fmt.Sprintf("!%s", queryReplacer.Replace(k)))
