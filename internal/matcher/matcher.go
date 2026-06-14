@@ -200,6 +200,20 @@ func isYearNumber(s string) bool {
 	return len(s) == 4 && (strings.HasPrefix(s, "19") || strings.HasPrefix(s, "20"))
 }
 
+// isNumber checks if a string consists entirely of digits
+func isNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // isTechnicalToken performs an allocation-free dynamic check to identify season, episode,
 // and pack-specific serialization tokens, allowing them to safely bypass the guardrail.
 func isTechnicalToken(s string) bool {
