@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"runtime"
 	"sort"
@@ -73,7 +74,7 @@ var metadataWords = map[string]bool{
 	"dk": true, "new": true, "full": true, "all": true,
 	// Regional language/subtitle abbreviations & subdomain noise markers
 	"tam": true, "tel": true, "hin": true, "eng": true, "mal": true, "kan": true,
-	"msub": true, "esub": true, "tamilmv": true, "tamilblasters": true, "bolly4u": true, "torrent911": true,
+	"msub": true, "tamilmv": true, "tamilblasters": true, "bolly4u": true, "torrent911": true,
 }
 
 // sequelIndicators are words that strongly suggest a different franchise entry.
@@ -444,18 +445,6 @@ func isRomanSequence(s string) bool {
 	}
 	for _, r := range s {
 		if r != 'i' && r != 'v' && r != 'x' && r != 'l' && r != 'c' && r != 'd' && r != 'm' {
-			return false
-		}
-	}
-	return true
-}
-
-func isNumber(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
 			return false
 		}
 	}
