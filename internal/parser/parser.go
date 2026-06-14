@@ -42,54 +42,12 @@ var languageToISO = map[rtp.Language]string{
 	rtp.LanguageGerman:        "de",
 	rtp.LanguageFrench:        "fr",
 	rtp.LanguageItalian:       "it",
-	rtp.LanguageRussian:       "ru",
-	rtp.LanguageJapanese:      "ja",
-	rtp.LanguageChinese:       "zh",
-	rtp.LanguageKorean:        "ko",
-	rtp.LanguagePortuguese:    "pt",
-	rtp.LanguagePortugueseBR:  "pt-BR",
-	rtp.LanguageDutch:         "nl",
-	rtp.LanguageDanish:        "da",
-	rtp.LanguageNorwegian:     "no",
-	rtp.LanguageSwedish:       "sv",
-	rtp.LanguageFinnish:       "fi",
-	rtp.LanguagePolish:        "pl",
-	rtp.LanguageCzech:         "cs",
-	rtp.LanguageSlovak:        "sk",
-	rtp.LanguageHungarian:     "hu",
-	rtp.LanguageRomanian:      "ro",
-	rtp.LanguageBulgarian:     "bg",
-	rtp.LanguageUkrainian:     "uk",
-	rtp.LanguageGreek:         "el",
-	rtp.LanguageTurkish:       "tr",
-	rtp.LanguageArabic:        "ar",
-	rtp.LanguageHindi:         "hi",
-	rtp.LanguageThai:          "th",
-	rtp.LanguageVietnamese:    "vi",
-	rtp.LanguageHebrew:        "he",
-	rtp.LanguagePersian:       "fa",
-	rtp.LanguageBengali:       "bn",
-	rtp.LanguageLatvian:       "lv",
-	rtp.LanguageLithuanian:    "lt",
+	rtp.LanguageEnglish:       "en",
 	rtp.LanguageSpanishLatino: "es-MX",
 	rtp.LanguageTamil:         "ta",
 	rtp.LanguageTelugu:        "te",
 	rtp.LanguageMalayalam:     "ml",
 	rtp.LanguageKannada:       "kn",
-	rtp.LanguageAlbanian:      "sq",
-	rtp.LanguageAfrikaans:     "af",
-	rtp.LanguageMarathi:       "mr",
-	rtp.LanguageTagalog:       "tl",
-	rtp.LanguageIcelandic:     "is",
-	rtp.LanguageFlemish:       "nl-BE",
-	rtp.LanguageUrdu:          "ur",
-	rtp.LanguageMongolian:     "mn",
-	rtp.LanguageGeorgian:      "ka",
-	rtp.LanguageRomansh:       "rm",
-	rtp.LanguageOriginal:      "original",
-	rtp.LanguageCatalan:       "ca",
-	rtp.LanguageAzerbaijani:   "az",
-	rtp.LanguageUzbek:         "uz",
 }
 
 // Collapses spaces and symbols between SXX and EP(XX) to force standard SXXEXX grouping
@@ -115,6 +73,12 @@ var compactRegex = regexp.MustCompile(`(?i)\bE(\d{2})(\d{2})\b`)
 
 // Radarr/Sonarr Website Domain Prefix Stripper - Upgraded to fully match changing subdomains, domain names, and TLDs with or without www
 var websitePrefixRegex = regexp.MustCompile(`(?i)(?:^|[\s_.-]*)(?:(?:www\d*\.)?[a-z0-9-]+\.[a-z]{2,6}\b|\[\s*(?:www\d*\.)?[a-z0-9-]+\.[a-z]{2,6}\s*\])[\s_.-]*`)
+
+// Conjoined metadata regexes to detect and separate squashed release words (e.g. Scratch1080p, Scratchx264, S01WEBRip)
+var conjoinedQualityRegex = regexp.MustCompile(`(?i)\b([a-z]+)(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
+var conjoinedCodecRegex = regexp.MustCompile(`(?i)\b([a-z]+)(x264|x265|h264|h265|hevc|avc)\b`)
+var conjoinedSourceRegex = regexp.MustCompile(`(?i)\b([a-z]+)(webrip|webdl|bluray|hdtv|bdrip|brrip)\b`)
+var conjoinedSeasonRegex = regexp.MustCompile(`(?i)\b(S\d+)(webrip|webdl|bluray|hdtv|bdrip|brrip|x264|x265|h264|h265|2160p|1080p|720p|4k|uhd)\b`)
 
 // Unified metadata boundary pattern to slice titles cleanly at the earliest occurrence of any noise/season tags
 var boundaryRegex = regexp.MustCompile(`(?i)\b(?:S\d+E\d+|S\d+|\d+x\d+|Season\s*\d+|Seasons\s*\d+|2160p|1080p|720p|480p|360p|4k|uhd|bluray|hdtv|web[-_.]?dl|webrip|hdr|sdr|h264|h265|x264|x265|hevc|ddp|dd\+|eac3|truehd|atmos|19\d{2}|20\d{2})\b`)
@@ -431,6 +395,12 @@ func getQuality(res int) string {
 func SanitizeName(name string) string {
 	// Strip Radarr/Sonarr-style Website Prefix Domains (e.g. www.1TamilMV.yt - or [TamilBlasters.gripe] ) before parsing
 	s := websitePrefixRegex.ReplaceAllString(name, "")
+
+	// Insert spaces before conjoined technical keywords to prevent unified word tokenization failures (e.g. Scratch1080p -> Scratch 1080p)
+	s = conjoinedQualityRegex.ReplaceAllString(s, "$1 $2")
+	s = conjoinedCodecRegex.ReplaceAllString(s, "$1 $2")
+	s = conjoinedSourceRegex.ReplaceAllString(s, "$1 $2")
+	s = conjoinedSeasonRegex.ReplaceAllString(s, "$1 $2")
 
 	// Replace dot and underscore delimiters with standard spaces to prevent conjoined word parsing errors
 	s = strings.ReplaceAll(s, ".", " ")
