@@ -468,9 +468,6 @@ func SanitizeName(name string) string {
 	return s
 }
 
-// Global LRU Cache for RobustParseInfo (Caches up to 10000 unique filenames globally)
-var robustParseCache = NewBoundedCache[string, *ParseResult](10000, 24*time.Hour)
-
 func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	parseCacheMu.RLock()
 	entry, ok := parseCache[title]
