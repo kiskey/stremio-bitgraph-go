@@ -126,8 +126,13 @@ var conjoinedSeasonRegex = regexp.MustCompile(`(?i)\b(S\d+)(webrip|webdl|bluray|
 var conjoinedAudioDigitsRegex = regexp.MustCompile(`(?i)\b(\d+)(dts|ac3|aac|mp3)\b`)
 var conjoinedAudioAlphaRegex = regexp.MustCompile(`(?i)\b([a-z]+)(dts|ac3|aac|mp3)\b`)
 
-// Unified metadata boundary pattern to slice titles cleanly at the earliest occurrence of any noise/season tags
-var boundaryRegex = regexp.MustCompile(`(?i)\b(?:S\d+E\d+|S\d+|\d+x\d+|Season\s*\d+|Seasons\s*\d+|2160p|1080p|720p|480p|360p|4k|uhd|bluray|hdtv|web[-_.]?dl|webrip|hdr|sdr|h264|h265|x264|x265|hevc|ddp|dd\+|eac3|truehd|atmos|19\d{2}|20\d{2})\b`)
+// Conjoined alphanumeric splitters to separate squashed numbers and letters natively (e.g. 2007mp4 -> 2007 mp4, 300FLAiTE -> 300 FLAiTE)
+var conjoinedDigitToLetters = regexp.MustCompile(`(?i)\b(\d+)([a-z]{2,})\b`)
+var conjoinedLettersToDigits = regexp.MustCompile(`(?i)\b([a-z]{2,})(\d+)\b`)
+var conjoinedDigitToCodec = regexp.MustCompile(`(?i)\b(\d+)(x264|x265|h264|h265|hevc|avc|webrip|webdl|bluray|hdtv|bdrip|brrip|2160p|1080p|720p|4k|uhd)\b`)
+
+// Unified metadata boundary pattern to slice titles cleanly at the earliest occurrence of any noise/season tags (Including standard audio codecs)
+var boundaryRegex = regexp.MustCompile(`(?i)\b(?:S\d+E\d+|S\d+|\d+x\d+|Season\s*\d+|Seasons\s*\d+|2160p|1080p|720p|480p|360p|4k|uhd|bluray|hdtv|web[-_.]?dl|webrip|hdr|sdr|h264|h265|x264|x265|hevc|ddp|dd\+|eac3|truehd|atmos|ac3|dts|aac|mp3|flac|19\d{2}|20\d{2})\b`)
 
 // Low-Allocation pre-defined filters deconstructed from Perl badges.json to RE2 standard.
 // Matches exactly all 39 filters defined in badges.json with extended support for NF and AMZN.
@@ -452,6 +457,11 @@ func SanitizeName(name string) string {
 	s = conjoinedAudioDigitsRegex.ReplaceAllString(s, "$1 $2")
 	s = conjoinedAudioAlphaRegex.ReplaceAllString(s, "$1 $2")
 
+	// Insert spaces between conjoined digits and letters (e.g. 2007mp4 -> 2007 mp4, 300FLAiTE -> 300 FLAiTE)
+	s = conjoinedDigitToLetters.ReplaceAllString(s, "$1 $2")
+	s = conjoinedLettersToDigits.ReplaceAllString(s, "$1 $2")
+	s = conjoinedDigitToCodec.ReplaceAllString(s, "$1 $2")
+
 	// Replace dot and underscore delimiters with standard spaces to prevent conjoined word parsing errors
 	s = strings.ReplaceAll(s, ".", " ")
 	s = strings.ReplaceAll(s, "_", " ")
@@ -577,9 +587,19 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 				IsPack:   isPack,
 			}
 		} else {
-			// Slicing Fallback using boundary markers if no explicit patterns matched
-			if loc := boundaryRegex.FindStringIndex(clean); loc != nil && loc[0] > 0 {
-				slicedTitle := strings.Trim(clean[:loc[0]], " .-_[]()/\\")
+			// Slicing Fallback: Scan the entire string and slice at the earliest boundary that is NOT at index 0 (which is the title itself)
+			// This prevents numeric titles (like "2012" or "300") from blocking metadata checks (such as "2009" or "2007") later in the file name.
+			var bestLoc []int
+			for _, loc := range boundaryRegex.FindAllStringIndex(clean, -1) {
+				if loc != nil && loc[0] > 0 {
+					if bestLoc == nil || loc[0] < bestLoc[0] {
+						bestLoc = loc
+					}
+				}
+			}
+
+			if bestLoc != nil {
+				slicedTitle := strings.Trim(clean[:bestLoc[0]], " .-_[]()/\\")
 				if slicedTitle != "" {
 					result = &ParseResult{
 						Title:    slicedTitle,
