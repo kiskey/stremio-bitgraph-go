@@ -277,19 +277,27 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		var refinedTorrents, broadTorrents []bitmagnet.TorrentItem
 		g, gCtx := errgroup.WithContext(ctx)
 
-		// Refined Query: Combines target show title with the highly unique episode block (e.g. From S02E09)
-		// This bypasses PostgreSQL GIN/FTS stop-word deletion as the episode code is preserved natively.
+		// Refined Query: Combines target show title, episode block, and premiere year (e.g. From S02E09 2022)
+		// This forces PostgreSQL FTS to filter strictly by your show's launch year, preventing stop-word failures.
 		g.Go(func() error {
-			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, fmt.Sprintf("%sE%02d", sPadded, episode))
+			suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
+			if meta.Year != "" {
+				suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
+			}
+			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
 			var innerErr error
 			refinedTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, refinedQuery, "tv_show", 50)
 			return innerErr
 		})
 
-		// Broad Query: Combines target show title with the season block (e.g. From S02)
+		// Broad Query: Combines target show title, season block, and premiere year (e.g. From S02 2022)
 		// Guarantees that complete season packs are returned even if the FTS strips the show's name.
 		g.Go(func() error {
-			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, sPadded)
+			suffix := sPadded
+			if meta.Year != "" {
+				suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
+			}
+			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
 			var innerErr error
 			broadTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, broadQuery, "tv_show", 100)
 			return innerErr
