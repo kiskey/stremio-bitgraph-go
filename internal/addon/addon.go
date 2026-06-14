@@ -277,7 +277,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		var refinedTorrents, broadTorrents []bitmagnet.TorrentItem
 		g, gCtx := errgroup.WithContext(ctx)
 
-		// Refined Query: Combines target show title with the highly unique episode block (e.g. From S03E03)
+		// Refined Query: Combines target show title with the highly unique episode block (e.g. From S02E09)
 		// This bypasses PostgreSQL GIN/FTS stop-word deletion as the episode code is preserved natively.
 		g.Go(func() error {
 			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, fmt.Sprintf("%sE%02d", sPadded, episode))
@@ -286,7 +286,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			return innerErr
 		})
 
-		// Broad Query: Combines target show title with the season block (e.g. From S03)
+		// Broad Query: Combines target show title with the season block (e.g. From S02)
 		// Guarantees that complete season packs are returned even if the FTS strips the show's name.
 		g.Go(func() error {
 			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, sPadded)
