@@ -2,7 +2,6 @@ package matcher
 
 import (
 	"context"
-	"fmt"
 	"regexp"
 	"runtime"
 	"sort"
@@ -38,7 +37,7 @@ var stopWords = map[string]bool{
 	"la": true, "le": true, "les": true, "el": true, "un": true, "une": true,
 }
 
-// metadataWords are technical tags that should not trigger the single-word guardrail.
+// Technical tags that should not trigger the single-word guardrail.
 // These are common torrent metadata tokens that appear after the actual movie title.
 var metadataWords = map[string]bool{
 	"1080p": true, "720p": true, "2160p": true, "480p": true, "360p": true,
@@ -55,7 +54,7 @@ var metadataWords = map[string]bool{
 	"dual": true, "audio": true, "dubbed": true, "dub": true, "multi": true,
 	"hindi": true, "tamil": true, "telugu": true, "malayalam": true,
 	"kannada": true, "bengali": true, "marathi": true, "punjabi": true,
-	"english": true, "spanish": true, "french": true, "italian": true,
+	"english": true, "spanish": true, "french": true, "italic": true,
 	"russian": true, "korean": true, "japanese": true, "chinese": true,
 	"51": true, "71": true, "20": true, "10bit": true, "remux": true,
 	"3d": true, "sdr": true, "gb": true, "mb": true, "kb": true,
@@ -63,6 +62,18 @@ var metadataWords = map[string]bool{
 	"complete": true, "repack": true, "proper": true, "vostfr": true,
 	"subs":     true, "sub": true, "esub": true, "vof": true, "vff": true,
 	"vf":       true, "season": true, "series": true, "episode": true, "pack": true,
+	// Aligned common extensions and formats
+	"mkv": true, "mp4": true, "avi": true, "mov": true, "wmv": true, "flv": true, "webm": true,
+	"rar": true, "zip": true, "par2": true, "nfo": true, "srt": true,
+	// Country/region identifiers & miscellaneous common tags to prevent false negatives
+	"us": true, "uk": true, "ca": true, "nz": true, "au": true,
+	"fr": true, "de": true, "jp": true, "kr": true, "cn": true,
+	"hk": true, "tw": true, "it": true, "es": true, "nl": true,
+	"pl": true, "ru": true, "se": true, "no": true, "fi": true,
+	"dk": true, "new": true, "full": true, "all": true,
+	// Regional language/subtitle abbreviations & subdomain noise markers
+	"tam": true, "tel": true, "hin": true, "eng": true, "mal": true, "kan": true,
+	"msub": true, "esub": true, "tamilmv": true, "tamilblasters": true, "bolly4u": true, "torrent911": true,
 }
 
 // sequelIndicators are words that strongly suggest a different franchise entry.
@@ -156,62 +167,76 @@ func stripLeadingArticles(s string) string {
 	return s
 }
 
+// cleanWord converts a string to lowercase and removes non-alphanumeric characters.
+// Features an allocation-free fast-path for already cleaned string inputs.
 func cleanWord(w string) string {
-	return strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			return r
+	hasUpperOrNonAlpha := false
+	for i := 0; i < len(w); i++ {
+		c := w[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+			hasUpperOrNonAlpha = true
+			break
 		}
-		return -1
-	}, strings.ToLower(w))
+	}
+	if !hasUpperOrNonAlpha {
+		return w
+	}
+
+	var buf []byte
+	for i := 0; i < len(w); i++ {
+		c := w[i]
+		if c >= 'A' && c <= 'Z' {
+			buf = append(buf, c+32)
+		} else if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			buf = append(buf, c)
+		}
+	}
+	return string(buf)
+}
+
+// isYearNumber checks if a string is a standard 4-digit release year
+func isYearNumber(s string) bool {
+	return len(s) == 4 && (strings.HasPrefix(s, "19") || strings.HasPrefix(s, "20"))
 }
 
 // isTechnicalToken performs an allocation-free dynamic check to identify season, episode,
 // and pack-specific serialization tokens, allowing them to safely bypass the guardrail.
 func isTechnicalToken(s string) bool {
-	// 1. Direct O(1) Map Lookups
 	if metadataWords[s] || stopWords[s] {
 		return true
 	}
 
-	// 2. Standalone Number Check (e.g. "1", "01")
 	if isNumber(s) {
 		return true
 	}
 
-	// 3. Dynamic Prefix + Number Parsing (Allocation-Free Slicing)
 	if len(s) >= 2 {
-		// "s1", "e1", "p1"
 		first := s[0]
 		if (first == 's' || first == 'e' || first == 'p') && isNumber(s[1:]) {
 			return true
 		}
-		// "se1", "ep1"
 		if len(s) >= 3 {
 			prefix2 := s[:2]
 			if (prefix2 == "se" || prefix2 == "ep") && isNumber(s[2:]) {
 				return true
 			}
 		}
-		// "epi1"
 		if len(s) >= 4 {
 			if s[:3] == "epi" && isNumber(s[3:]) {
 				return true
 			}
 		}
-		// "seas1", "part1"
 		if len(s) >= 5 {
 			prefix4 := s[:4]
 			if (prefix4 == "seas" || prefix4 == "part") && isNumber(s[4:]) {
 				return true
 			}
 		}
-		// "season1", "series1"
 		if len(s) >= 7 {
 			if s[:6] == "season" && isNumber(s[6:]) {
 				return true
 			}
 		}
-		// "episode1"
 		if len(s) >= 8 {
 			if s[:7] == "episode" && isNumber(s[7:]) {
 				return true
@@ -241,9 +266,33 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 	targetWords := strings.Fields(targetNoArt)
 	parsedWords := strings.Fields(parsedNoArt)
 
+	// ── UPGRADE: Substantive Word Guardrail ──
+	// Ensure the parsed title doesn't contain unrelated substantive words.
+	// This prevents partial title matches, release group leaks, and unrelated shows.
+	targetWordSet := make(map[string]bool)
+	for _, w := range targetWords {
+		targetWordSet[cleanWord(w)] = true
+	}
+
+	hasUnrelatedSubstantiveWord := false
+	for _, w := range parsedWords {
+		cw := cleanWord(w)
+		if cw == "" {
+			continue
+		}
+		if targetWordSet[cw] || isTechnicalToken(cw) {
+			continue
+		}
+		hasUnrelatedSubstantiveWord = true
+		break
+	}
+
+	if hasUnrelatedSubstantiveWord {
+		return false // ❌ REJECTED (Unrelated Substantive Word Detected)
+	}
+
 	// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail ──
 	if len(targetWords) > 1 && len(parsedWords) > len(targetWords) {
-		// Verify if the parsed title starts with the target phrase
 		startsSame := true
 		for i := 0; i < len(targetWords); i++ {
 			if cleanWord(parsedWords[i]) != cleanWord(targetWords[i]) {
@@ -253,7 +302,6 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 		}
 
 		if startsSame {
-			// Extract the extra trailing tokens (P \ T)
 			extraWords := parsedWords[len(targetWords):]
 			hasSubstantiveProperNoun := false
 			for _, w := range extraWords {
@@ -261,8 +309,6 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 				if cw == "" {
 					continue
 				}
-				// If the extra word is NOT a stop word and NOT a technical metadata word/pattern,
-				// we flag it as an unauthorizedProperNoun (indicating a different show entity).
 				if !isTechnicalToken(cw) {
 					hasSubstantiveProperNoun = true
 					break
@@ -274,15 +320,10 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 		}
 	}
 
-	// ── Standard Single-Word Title Guardrail (Preserved & Fine-Tuned) ──
+	// ── Standard Single-Word Title Guardrail (Corrected & Safe) ──
 	if len(targetWords) == 1 {
 		singleWord := cleanWord(targetWords[0])
 		if len(parsedWords) > 1 {
-			firstWord := cleanWord(parsedWords[0])
-			if firstWord == singleWord {
-				return true
-			}
-
 			hasExtraNonMeta := false
 			for _, w := range parsedWords {
 				cw := cleanWord(w)
@@ -294,6 +335,8 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 			if hasExtraNonMeta {
 				return false // ❌ REJECTED
 			}
+			// If all extra words are only technical metadata tokens (like 1080p, x264), it is a safe match
+			return true
 		}
 	}
 	return true
@@ -306,8 +349,22 @@ func getHomoglyphRepresentations(r rune) []rune {
 	return []rune{r}
 }
 
+// Global recycled pool for fast map reuse (Zero allocations on map creation)
+var uint64MapPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[uint64]struct{}, 64)
+	},
+}
+
+func clearMap(m map[uint64]struct{}) {
+	for k := range m {
+		delete(m, k)
+	}
+}
+
 // OverlapCoefficient computes the overlap coefficient between two strings
 // using multi-representation homoglyph character bigrams.
+// Fully optimized for zero heap allocations, bitwise rune-packing, and zero GC pressure.
 func OverlapCoefficient(s1, s2 string) float64 {
 	if s1 == s2 {
 		return 1.0
@@ -317,35 +374,56 @@ func OverlapCoefficient(s1, s2 string) float64 {
 		return 0.0
 	}
 
-	bg1 := make(map[string]struct{}, len(s1)*2)
-	runes1 := []rune(s1)
-	for i := 0; i < len(runes1)-1; i++ {
-		repsA := getHomoglyphRepresentations(runes1[i])
-		repsB := getHomoglyphRepresentations(runes1[i+1])
+	bg1 := uint64MapPool.Get().(map[uint64]struct{})
+	bg2 := uint64MapPool.Get().(map[uint64]struct{})
+	defer func() {
+		clearMap(bg1)
+		uint64MapPool.Put(bg1)
+		clearMap(bg2)
+		uint64MapPool.Put(bg2)
+	}()
+
+	var lastRune rune
+	hasLast := false
+	for _, r := range s1 {
+		if !hasLast {
+			lastRune = r
+			hasLast = true
+			continue
+		}
+		repsA := getHomoglyphRepresentations(lastRune)
+		repsB := getHomoglyphRepresentations(r)
 		for _, charA := range repsA {
 			for _, charB := range repsB {
-				bg1[string(charA)+string(charB)] = struct{}{}
+				packed := (uint64(charA) << 32) | uint64(charB)
+				bg1[packed] = struct{}{}
 			}
 		}
+		lastRune = r
 	}
 
-	bg2 := make(map[string]struct{}, len(s2)*2)
-	runes2 := []rune(s2)
 	intersection := 0
-	for i := 0; i < len(runes2)-1; i++ {
-		repsA := getHomoglyphRepresentations(runes2[i])
-		repsB := getHomoglyphRepresentations(runes2[i+1])
+	hasLast = false
+	for _, r := range s2 {
+		if !hasLast {
+			lastRune = r
+			hasLast = true
+			continue
+		}
+		repsA := getHomoglyphRepresentations(lastRune)
+		repsB := getHomoglyphRepresentations(r)
 		for _, charA := range repsA {
 			for _, charB := range repsB {
-				bigram := string(charA) + string(charB)
-				if _, ok := bg2[bigram]; !ok {
-					bg2[bigram] = struct{}{}
-					if _, exists := bg1[bigram]; exists {
+				packed := (uint64(charA) << 32) | uint64(charB)
+				if _, ok := bg2[packed]; !ok {
+					bg2[packed] = struct{}{}
+					if _, exists := bg1[packed]; exists {
 						intersection++
 					}
 				}
 			}
 		}
+		lastRune = r
 	}
 
 	if len(bg1) == 0 || len(bg2) == 0 {
@@ -449,7 +527,7 @@ func extractNonYearNumbers(s string) []string {
 		} else {
 			if current.Len() > 0 {
 				val := current.String()
-				if !ignoredNumbers[val] && !(len(val) == 4 && (strings.HasPrefix(val, "19") || strings.HasPrefix(val, "20"))) {
+				if !ignoredNumbers[val] && !isYearNumber(val) {
 					nums = append(nums, val)
 				}
 				current.Reset()
@@ -458,7 +536,7 @@ func extractNonYearNumbers(s string) []string {
 	}
 	if current.Len() > 0 {
 		val := current.String()
-		if !ignoredNumbers[val] && !(len(val) == 4 && (strings.HasPrefix(val, "19") || strings.HasPrefix(val, "20"))) {
+		if !ignoredNumbers[val] && !isYearNumber(val) {
 			nums = append(nums, val)
 		}
 	}
@@ -536,7 +614,8 @@ func sequelGuardrail(targetTitle, parsedTitle string, score float64) float64 {
 	extraWords := strings.Fields(extra)
 	for _, w := range extraWords {
 		cw := cleanWord(w)
-		if isRomanSequence(cw) || isNumber(cw) || sequelIndicators[cw] {
+		// Upgrade: Prevent legitimate release years from destroying movie similarity scores
+		if isRomanSequence(cw) || (isNumber(cw) && !isYearNumber(cw)) || sequelIndicators[cw] {
 			return score * (float64(shorter) / float64(longer))
 		}
 	}
@@ -576,11 +655,45 @@ func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 
 	oc = sequelGuardrail(tmdbTitle, parsed.Title, oc)
 
-	if oc >= config.SimilarityThreshold {
-		return oc
-	}
-
 	return oc
+}
+
+// stripDiacritics maps standard Latin-1 and advanced unicode diacritics to ASCII base characters
+func stripDiacritics(s string) string {
+	var replacer = strings.NewReplacer(
+		"ā", "a", "á", "a", "à", "a", "ä", "a", "â", "a", "ã", "a", "å", "a",
+		"ē", "e", "é", "e", "è", "e", "ë", "e", "ê", "e",
+		"ī", "i", "í", "i", "ì", "i", "ï", "i", "î", "i",
+		"ō", "o", "ó", "o", "ò", "o", "ö", "o", "ô", "o", "õ", "o", "ø", "o",
+		"ū", "u", "ú", "u", "ù", "u", "ü", "u", "û", "u",
+		"ý", "y", "ÿ", "y",
+		"ñ", "n", "ç", "c",
+		"Ā", "A", "Á", "A", "À", "A", "Ä", "A", "Â", "A", "Ã", "A", "Å", "A",
+		"Ē", "E", "É", "E", "È", "E", "Ë", "E", "Ê", "E",
+		"Ī", "I", "Í", "I", "Ì", "I", "Ï", "I", "Î", "I",
+		"Ō", "O", "Ó", "O", "Ò", "O", "Ö", "O", "Ô", "O", "Õ", "O", "Ø", "O",
+		"Ū", "U", "Ú", "U", "Ù", "U", "Ü", "U", "Û", "U",
+		"Ý", "Y", "Ñ", "N", "Ç", "C",
+	)
+	return replacer.Replace(s)
+}
+
+// injectNormalizedAltTitle adds the un-accented ASCII representation to AltTitles if it differs from the primary name
+func injectNormalizedAltTitle(name string, alts []string) []string {
+	normalized := stripDiacritics(name)
+	if normalized != name {
+		isUnique := true
+		for _, existing := range alts {
+			if existing == normalized {
+				isUnique = false
+				break
+			}
+		}
+		if isUnique {
+			alts = append(alts, normalized)
+		}
+	}
+	return alts
 }
 
 func getBestLanguage(torrentLanguages []struct{ ID string }, preferredLanguages []string) string {
@@ -797,7 +910,15 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 			if parsed.Season == season || isMultiSeasonPack {
 				if td.FilesStatus == "single" {
-					if parsed.Episode != 0 && parsed.Episode != episode {
+					matched := false
+					if parsed.Episode == episode {
+						matched = true
+					}
+					// Dynamic single-file range validation (Sonarr/Radarr compatible fallback)
+					if !matched && parser.MatchRange(td.Name, episode) {
+						matched = true
+					}
+					if !matched {
 						return nil
 					}
 
