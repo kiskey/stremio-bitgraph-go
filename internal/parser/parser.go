@@ -122,6 +122,10 @@ var conjoinedCodecRegex = regexp.MustCompile(`(?i)\b([a-z]+)(x264|x265|h264|h265
 var conjoinedSourceRegex = regexp.MustCompile(`(?i)\b([a-z]+)(webrip|webdl|bluray|hdtv|bdrip|brrip)\b`)
 var conjoinedSeasonRegex = regexp.MustCompile(`(?i)\b(S\d+)(webrip|webdl|bluray|hdtv|bdrip|brrip|x264|x265|h264|h265|2160p|1080p|720p|4k|uhd)\b`)
 
+// Conjoined audio regexes to separate squashed audio profiles (e.g. 2009DTS -> 2009 DTS, AC3HELLYWOOD -> AC3 HELLYWOOD)
+var conjoinedAudioDigitsRegex = regexp.MustCompile(`(?i)\b(\d+)(dts|ac3|aac|mp3)\b`)
+var conjoinedAudioAlphaRegex = regexp.MustCompile(`(?i)\b([a-z]+)(dts|ac3|aac|mp3)\b`)
+
 // Unified metadata boundary pattern to slice titles cleanly at the earliest occurrence of any noise/season tags
 var boundaryRegex = regexp.MustCompile(`(?i)\b(?:S\d+E\d+|S\d+|\d+x\d+|Season\s*\d+|Seasons\s*\d+|2160p|1080p|720p|480p|360p|4k|uhd|bluray|hdtv|web[-_.]?dl|webrip|hdr|sdr|h264|h265|x264|x265|hevc|ddp|dd\+|eac3|truehd|atmos|19\d{2}|20\d{2})\b`)
 
@@ -443,6 +447,10 @@ func SanitizeName(name string) string {
 	s = conjoinedCodecRegex.ReplaceAllString(s, "$1 $2")
 	s = conjoinedSourceRegex.ReplaceAllString(s, "$1 $2")
 	s = conjoinedSeasonRegex.ReplaceAllString(s, "$1 $2")
+
+	// Insert spaces before conjoined audio tokens (e.g. 2009DTS -> 2009 DTS, AC3HELLYWOOD -> AC3 HELLYWOOD)
+	s = conjoinedAudioDigitsRegex.ReplaceAllString(s, "$1 $2")
+	s = conjoinedAudioAlphaRegex.ReplaceAllString(s, "$1 $2")
 
 	// Replace dot and underscore delimiters with standard spaces to prevent conjoined word parsing errors
 	s = strings.ReplaceAll(s, ".", " ")
