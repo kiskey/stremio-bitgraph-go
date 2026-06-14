@@ -94,7 +94,13 @@ func manifestHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func buildOptimizedQuery(name string, altTitles []string, suffix string) string {
+	// Clean colons, hyphens, and brackets from the query string to prevent FTS parser confusion (e.g. "From Dusk Till Dawn: The Series" -> "From Dusk Till Dawn The Series")
 	nameClean := queryReplacer.Replace(name)
+	nameClean = strings.ReplaceAll(nameClean, ":", " ")
+	nameClean = strings.ReplaceAll(nameClean, "-", " ")
+	nameClean = strings.ReplaceAll(nameClean, "(", " ")
+	nameClean = strings.ReplaceAll(nameClean, ")", " ")
+	nameClean = strings.Join(strings.Fields(nameClean), " ")
 
 	// Detect if the show name is a single word or short stop-word
 	isShortOrStopWord := len(strings.Fields(nameClean)) == 1
