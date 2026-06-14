@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"runtime"
@@ -9,10 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/user/stremio-bitgraph-go/internal/bitmagnet"
 	"github.com/user/stremio-bitgraph-go/internal/config"
+	"github.com/user/stremio-bitgraph-go/internal/db"
 	"github.com/user/stremio-bitgraph-go/internal/parser"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
 	"golang.org/x/sync/errgroup"
@@ -144,6 +147,68 @@ var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\
 
 // In-memory undesirable releases keywords to prevent FTS negation bypass on stop-word searches
 var undesirableKeywords = []string{"3d", "cam", "screener", "hdcam", "hdts", "predvd", "dvdscr"}
+
+// Self-Learning Entropy Engine Global State Variables
+var (
+	entropyOnce      sync.Once
+	tokenFrequencies = make(map[string]int)
+	tokenFreqMu      sync.RWMutex
+)
+
+// InitializeEntropyEngine pre-seeds and scans the database to build self-learning token counts
+func InitializeEntropyEngine(ctx context.Context) {
+	// 1. Pre-seed with all metadataWords and stopWords to guarantee 100% cold-start safety
+	tokenFreqMu.Lock()
+	for k := range metadataWords {
+		tokenFrequencies[k] = 1000
+	}
+	for k := range stopWords {
+		tokenFrequencies[k] = 1000
+	}
+	tokenFreqMu.Unlock()
+
+	// 2. Query SQLite torrents table to digest cached filenames with zero circular dependency imports
+	rows, err := db.Pool.QueryContext(ctx, "SELECT torrent_info_json FROM torrents WHERE torrent_info_json IS NOT NULL")
+	if err != nil {
+		utils.Logger.Warn("Entropy Engine: Failed to query torrents table for learning", "error", err)
+		return
+	}
+	defer rows.Close()
+
+	tokenFreqMu.Lock()
+	defer tokenFreqMu.Unlock()
+
+	type minimalTorrentInfo struct {
+		Filename string `json:"filename"`
+	}
+
+	count := 0
+	for rows.Next() {
+		var jsonBytes []byte
+		if err := rows.Scan(&jsonBytes); err != nil {
+			continue
+		}
+		var info minimalTorrentInfo
+		if err := json.Unmarshal(jsonBytes, &info); err == nil && info.Filename != "" {
+			cleanName := parser.SanitizeName(info.Filename)
+			for _, w := range strings.Fields(strings.ToLower(cleanName)) {
+				tokenFrequencies[cleanWord(w)]++
+			}
+			count++
+		}
+	}
+	utils.Logger.Info("Entropy Engine: Successfully digested historical cache", "records", count, "unique_tokens", len(tokenFrequencies))
+}
+
+// UpdateEntropyToken registers a newly processed filename dynamically to keep the engine updated
+func UpdateEntropyToken(name string) {
+	tokenFreqMu.Lock()
+	defer tokenFreqMu.Unlock()
+	cleanName := parser.SanitizeName(name)
+	for _, w := range strings.Fields(strings.ToLower(cleanName)) {
+		tokenFrequencies[cleanWord(w)]++
+	}
+}
 
 // isBlockedArchive checks if a torrent name is a compressed archive that Stremio cannot play
 func isBlockedArchive(name string) bool {
@@ -337,7 +402,23 @@ func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) boo
 		if cw == "" {
 			continue
 		}
-		if targetWordSet[cw] || isTechnicalToken(cw) {
+		if targetWordSet[cw] {
+			continue
+		}
+
+		// Self-Learning Entropy Guardrail:
+		// Check the dynamic frequency of the word in our database.
+		// If the word appears across 3 or more records, it is classified as low-entropy noise (metadata).
+		// If it has a frequency of 1 or 2, it is treated as a highly unique substantive word (another show/movie title).
+		tokenFreqMu.RLock()
+		freq := tokenFrequencies[cw]
+		tokenFreqMu.RUnlock()
+
+		if freq >= 3 {
+			continue // Low-entropy noise word (Safely Skipped)
+		}
+
+		if isTechnicalToken(cw) {
 			continue
 		}
 		hasUnrelatedSubstantiveWord = true
@@ -384,15 +465,24 @@ func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) boo
 			hasExtraNonMeta := false
 			for _, w := range parsedWords {
 				cw := cleanWord(w)
-				if cw != "" && cw != singleWord && !isTechnicalToken(cw) {
-					hasExtraNonMeta = true
-					break
+				if cw != "" && cw != singleWord {
+					tokenFreqMu.RLock()
+					freq := tokenFrequencies[cw]
+					tokenFreqMu.RUnlock()
+
+					if freq >= 3 {
+						continue // Low-entropy noise word (Safely Skipped)
+					}
+
+					if !isTechnicalToken(cw) {
+						hasExtraNonMeta = true
+						break
+					}
 				}
 			}
 			if hasExtraNonMeta {
 				return false // ❌ REJECTED
 			}
-			// If all extra words are only technical metadata tokens (like 1080p, x264), it is a safe match
 			return true
 		}
 	}
@@ -816,6 +906,13 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 }
 
 func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, altTitles []string, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+	// Dynamically load the self-learning Entropy Engine exactly once on the first query execution.
+	// This eliminates startup circular dependency import cycles and cold-start latencies.
+	entropyOnce.Do(func() {
+		utils.Logger.Info("Entropy Engine: Initiating self-learning parser scan...")
+		InitializeEntropyEngine(context.Background())
+	})
+
 	for _, torrent := range cachedRows {
 		if findFileInTorrentInfo(torrent, season, episode) {
 			infoHash, _ := torrent["infohash"].(string)
@@ -1008,6 +1105,8 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 			}
 
 			if len(local) > 0 {
+				// Register matched filename dynamically to update Entropy Engine weights
+				UpdateEntropyToken(td.Name)
 				results <- jobResult{streams: local}
 			}
 			return nil
@@ -1026,6 +1125,12 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 }
 
 func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, altTitles []string, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+	// Dynamically load the self-learning Entropy Engine exactly once on the first query execution.
+	entropyOnce.Do(func() {
+		utils.Logger.Info("Entropy Engine: Initiating self-learning parser scan...")
+		InitializeEntropyEngine(context.Background())
+	})
+
 	for _, torrent := range cachedRows {
 		infoHash, _ := torrent["infohash"].(string)
 		lang, _ := torrent["language"].(string)
@@ -1181,6 +1286,9 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
 				quality = parsed.Quality
 			}
+
+			// Register matched filename dynamically to update Entropy Engine weights
+			UpdateEntropyToken(td.Name)
 
 			results <- jobResult{streams: []Stream{{
 				InfoHash:    t.InfoHash,
