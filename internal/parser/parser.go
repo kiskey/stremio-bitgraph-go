@@ -432,6 +432,10 @@ func SanitizeName(name string) string {
 	// Strip Radarr/Sonarr-style Website Prefix Domains (e.g. www.1TamilMV.yt - or [TamilBlasters.gripe] ) before parsing
 	s := websitePrefixRegex.ReplaceAllString(name, "")
 
+	// Replace dot and underscore delimiters with standard spaces to prevent conjoined word parsing errors
+	s = strings.ReplaceAll(s, ".", " ")
+	s = strings.ReplaceAll(s, "_", " ")
+
 	// 1. Replace non-breaking spaces (\u00a0, \u200b) to standard spaces
 	s = strings.ReplaceAll(s, "\u00a0", " ")
 	s = strings.ReplaceAll(s, "\u200b", " ")
@@ -463,6 +467,9 @@ func SanitizeName(name string) string {
 	s = strings.TrimRight(s, " .-_[]()/\\")
 	return s
 }
+
+// Global LRU Cache for RobustParseInfo (Caches up to 10000 unique filenames globally)
+var robustParseCache = NewBoundedCache[string, *ParseResult](10000, 24*time.Hour)
 
 func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	parseCacheMu.RLock()
