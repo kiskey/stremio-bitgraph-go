@@ -292,6 +292,11 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
 	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
 
+	// Temporarily replace hyphens with standard spaces to handle dash-joined titles
+	// like "From-Scratch" matching "From Scratch" cleanly.
+	cleanTarget = strings.ReplaceAll(cleanTarget, "-", " ")
+	cleanParsed = strings.ReplaceAll(cleanParsed, "-", " ")
+
 	if cleanTarget == cleanParsed {
 		return true
 	}
