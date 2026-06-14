@@ -137,6 +137,9 @@ var ignoredNumbers = map[string]bool{
 
 var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to)\s*0*(\d+)\b`)
 
+// In-memory undesirable releases keywords to prevent FTS negation bypass on stop-word searches
+var undesirableKeywords = []string{"3d", "cam", "screener", "hdcam", "hdts", "predvd", "dvdscr"}
+
 // isBlockedArchive checks if a torrent name is a compressed archive that Stremio cannot play
 func isBlockedArchive(name string) bool {
 	lower := strings.ToLower(name)
@@ -146,6 +149,27 @@ func isBlockedArchive(name string) bool {
 		strings.HasSuffix(lower, ".tar") ||
 		strings.HasSuffix(lower, ".tgz") ||
 		strings.HasSuffix(lower, ".gz")
+}
+
+// isUndesirableRelease performs a standard lookahead-free boundaries check inside Go memory space
+func isUndesirableRelease(name string) bool {
+	lower := strings.ToLower(name)
+	for _, k := range undesirableKeywords {
+		idx := strings.Index(lower, k)
+		if idx != -1 {
+			// Validate POSIX boundaries natively to prevent false positive matches
+			startBound := idx == 0 || !isAlphaNum(lower[idx-1])
+			endBound := idx+len(k) == len(lower) || !isAlphaNum(lower[idx+len(k)])
+			if startBound && endBound {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isAlphaNum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 }
 
 func containsNonASCII(s string) bool {
@@ -838,8 +862,8 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 		if torrentData.Name == "" {
 			continue
 		}
-		if isBlockedArchive(torrentData.Name) {
-			utils.Logger.Warn("filtering out series torrent: matches compressed archive pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
+		if isBlockedArchive(torrentData.Name) || isUndesirableRelease(torrentData.Name) {
+			utils.Logger.Warn("filtering out series torrent: matches compressed archive or undesirable pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
 			continue
 		}
 
@@ -1046,8 +1070,8 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 		if torrentData.Name == "" {
 			continue
 		}
-		if isBlockedArchive(torrentData.Name) {
-			utils.Logger.Warn("filtering out movie torrent: matches compressed archive pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
+		if isBlockedArchive(torrentData.Name) || isUndesirableRelease(torrentData.Name) {
+			utils.Logger.Warn("filtering out movie torrent: matches compressed archive or undesirable pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
 			continue
 		}
 
