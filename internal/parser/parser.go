@@ -116,23 +116,23 @@ var compactRegex = regexp.MustCompile(`(?i)\bE(\d{2})(\d{2})\b`)
 // Radarr/Sonarr Website Domain Prefix Stripper - Upgraded to fully match changing subdomains, domain names, and TLDs with or without www
 var websitePrefixRegex = regexp.MustCompile(`(?i)(?:^|[\s_.-]*)(?:(?:www\d*\.)?[a-z0-9-]+\.[a-z]{2,6}\b|\[\s*(?:www\d*\.)?[a-z0-9-]+\.[a-z]{2,6}\s*\])[\s_.-]*`)
 
-// Conjoined metadata regexes to detect and separate squashed release words (e.g. Scratch1080p, Scratchx264, S01WEBRip)
-var conjoinedQualityRegex = regexp.MustCompile(`(?i)\b([a-z]+)(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
-var conjoinedCodecRegex = regexp.MustCompile(`(?i)\b([a-z]+)(x264|x265|h264|h265|hevc|avc)\b`)
-var conjoinedSourceRegex = regexp.MustCompile(`(?i)\b([a-z]+)(dlrip|webrip|webdl|bluray|hdtv|bdrip|brrip)\b`)
+// Conjoined metadata regexes with strict lower-bounds of 3 characters to prevent short-word collisions (e.g. Scratch1080p, Scratchx264, S01WEBRip)
+var conjoinedQualityRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
+var conjoinedCodecRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(x264|x265|h264|h265|hevc|avc)\b`)
+var conjoinedSourceRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(dlrip|webrip|webdl|bluray|hdtv|bdrip|brrip)\b`)
 var conjoinedSeasonRegex = regexp.MustCompile(`(?i)\b(S\d+)(webrip|webdl|bluray|hdtv|bdrip|brrip|x264|x265|h264|h265|2160p|1080p|720p|4k|uhd)\b`)
 
-// Conjoined audio regexes to separate squashed audio profiles (e.g. 2009DTS -> 2009 DTS, AC3HELLYWOOD -> AC3 HELLYWOOD)
+// Conjoined audio regexes with strict lower-bounds of 3 characters
 var conjoinedAudioDigitsRegex = regexp.MustCompile(`(?i)\b(\d+)(dts|ac3|aac|mp3)\b`)
-var conjoinedAudioAlphaRegex = regexp.MustCompile(`(?i)\b([a-z]+)(dts|ac3|aac|mp3)\b`)
+var conjoinedAudioAlphaRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(dts|ac3|aac|mp3)\b`)
 
 // Conjoined alphanumeric splitters to separate squashed numbers and letters natively (e.g. 2007mp4 -> 2007 mp4, 300FLAiTE -> 300 FLAiTE)
 var conjoinedDigitToLetters = regexp.MustCompile(`(?i)\b(\d+)([a-z]{2,})\b`)
 var conjoinedLettersToDigits = regexp.MustCompile(`(?i)\b([a-z]{2,})(\d+)\b`)
 var conjoinedDigitToCodec = regexp.MustCompile(`(?i)\b(\d+)(x264|x265|h264|h265|hevc|avc|webrip|webdl|bluray|hdtv|bdrip|brrip|2160p|1080p|720p|4k|uhd)\b`)
 
-// Conjoined language/region splitters to separate conjoined language tags (e.g. FromEng -> From Eng, FromTam -> From Tam)
-var conjoinedLanguageRegex = regexp.MustCompile(`(?i)\b([a-z]+)(eng|tam|tel|hin|ger|spa|fre|ita|rus|jap|chi|kor|dut|pol|cze|hun|rom|bul|ukr|gre|tur|ara|tha|vie|heb|per|ben)\b`)
+// Conjoined language/region splitters with strict lower-bounds of 3 characters (e.g. FromEng -> From Eng, FromTam -> From Tam, preventing F-rom collisions)
+var conjoinedLanguageRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(eng|tam|tel|hin|ger|spa|fre|ita|rus|jap|chi|kor|dut|pol|cze|hun|rom|bul|ukr|gre|tur|ara|tha|vie|heb|per|ben)\b`)
 
 // Unified metadata boundary pattern to slice titles cleanly at the earliest occurrence of any noise/season tags (Including standard audio codecs)
 var boundaryRegex = regexp.MustCompile(`(?i)\b(?:S\d+E\d+|S\d+|\d+x\d+|Season\s*\d+|Seasons\s*\d+|2160p|1080p|720p|480p|360p|4k|uhd|bluray|hdtv|web[-_.]?dl|webrip|hdr|sdr|h264|h265|x264|x265|hevc|ddp|dd\+|eac3|truehd|atmos|ac3|dts|aac|mp3|flac|19\d{2}|20\d{2})\b`)
@@ -148,7 +148,7 @@ var filtersDef = []struct {
 }{
 	// Quality
 	{"q-r", "gq", "Remux", `(?i)\bremux\b`, nil},
-	{"q-b", "gq", "BluRay", `` + `(?i)\b(?:blu[-_. ]?ray|b[rd][-_. ]?rip)\b`, []string{`(?i)\bremux\b`}},
+	{"q-b", "gq", "BluRay", `(?i)\b(?:blu[-_. ]?ray|b[rd][-_. ]?rip)\b`, []string{`(?i)\bremux\b`}},
 	{"q-w", "gq", "WEB-DL", `(?i)\bweb[-_. ]?dl\b`, nil},
 	{"src-webrip", "gq", "WEBRip", `(?i)\bweb[-_. ]?rip\b`, nil},
 	{"src-hdtv", "gq", "HDTV", `(?i)\bhdtv\b`, nil},
