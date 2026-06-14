@@ -1111,6 +1111,11 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 
 			parsed := parser.RobustParseInfo(td.Name, 0)
 
+			// Type-Leakage Prevention: TV Series episodes/packs must never match as movie streams
+			if parsed.Season != 0 || parsed.Episode != 0 || parsed.IsPack {
+				return nil
+			}
+
 			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Movie) ──
 			if !passTitleGuardrail(matchingTitle, parsed.Title) {
 				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", matchingTitle, "parsed", parsed.Title)
