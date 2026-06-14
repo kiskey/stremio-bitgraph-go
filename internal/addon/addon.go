@@ -445,7 +445,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			// Formulate Stream Name (the button text)
 			streamName := fmt.Sprintf("[%s %s] %s | %s | %s", prefix, providerLabel, langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
 
-			// Formulate Stream Title (the description block) with Option B de-cluttered layout
+			// Formulate Stream Title (the description block) with Option B de-cluttered layout + Sanitized Filename
 			var titleBuilder strings.Builder
 			if typ == "series" {
 				packOrRange := checkPackOrRange(s.TorrentName, episode)
@@ -457,6 +457,11 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					titleBuilder.WriteString(fmt.Sprintf("🎬 %s\n", meta.Name))
 				}
 			}
+
+			// Clean actual filename with website prefixes and subdomains dynamically stripped
+			cleanedFileName := parser.SanitizeName(s.TorrentName)
+			titleBuilder.WriteString(fmt.Sprintf("📦 %s\n", cleanedFileName))
+
 			if matchedBadges != "" {
 				titleBuilder.WriteString(fmt.Sprintf("✨ %s\n", matchedBadges))
 			}
@@ -482,7 +487,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			// Formulate Stream Name (the button text)
 			streamName := fmt.Sprintf("[🧲 P2P] %s | %s | %s", langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
 
-			// Formulate Stream Title (the description block) with Option B de-cluttered layout
+			// Formulate Stream Title (the description block) with Option B de-cluttered layout + Sanitized Filename
 			var titleBuilder strings.Builder
 			if typ == "series" {
 				packOrRange := checkPackOrRange(s.TorrentName, episode)
@@ -494,6 +499,11 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					titleBuilder.WriteString(fmt.Sprintf("🎬 %s\n", meta.Name))
 				}
 			}
+
+			// Clean actual filename with website prefixes and subdomains dynamically stripped
+			cleanedFileName := parser.SanitizeName(s.TorrentName)
+			titleBuilder.WriteString(fmt.Sprintf("📦 %s\n", cleanedFileName))
+
 			if matchedBadges != "" {
 				titleBuilder.WriteString(fmt.Sprintf("✨ %s\n", matchedBadges))
 			}
