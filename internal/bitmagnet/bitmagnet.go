@@ -116,22 +116,32 @@ type TorrentFile struct {
 	FileType string `json:"fileType"`
 }
 
+// SearchTorrents queries the classified torrent_content table.
+// NOTE: Bitmagnet's GraphQL API has NO "raw torrents" search endpoint.
+// The only search available is torrentContent.search, which inner-joins torrent_content.
+// Unclassified torrents (content=null) are INVISIBLE to this API.
+// We maximize recall by: omitting contentType filter, using broad queries, and multiple variants.
 func SearchTorrents(ctx context.Context, searchString, contentType string, limit int) ([]TorrentItem, error) {
-	// Diagnostic logger for verifying compiled exact-phrase, FTS OR-unions, and negation query execution
 	utils.Logger.Debug("executing bitmagnet search query", "query", searchString, "content_type", contentType, "limit", limit)
 
-	// We omit the "contentType" facet filter entirely. 
-	// This forces Bitmagnet to search globally (matching its WebUI behavior), returning unclassified,
-	// movie, and TV show torrents alike. Our Go matcher then cleanly filters them in memory.
+	// Build facets - only include contentType if explicitly requested
+	// Omitting contentType searches across ALL classified content types
+	facets := map[string]interface{}{
+		"torrentFileType": map[string]interface{}{
+			"filter": []string{"video"},
+		},
+	}
+	if contentType != "" {
+		facets["contentType"] = map[string]interface{}{
+			"filter": []string{contentType},
+		}
+	}
+
 	variables := map[string]interface{}{
 		"input": map[string]interface{}{
 			"queryString": searchString,
 			"limit":       limit,
-			"facets": map[string]interface{}{
-				"torrentFileType": map[string]interface{}{
-					"filter": []string{"video"}, // Enforce server-side video filtering only
-				},
-			},
+			"facets":      facets,
 		},
 	}
 
