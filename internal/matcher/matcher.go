@@ -535,6 +535,94 @@ func getHomoglyphRepresentations(r rune) []rune {
 	return []rune{r}
 }
 
+var uint64MapPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[uint64]struct{}, 64)
+	},
+}
+
+func clearMap(m map[uint64]struct{}) {
+	for k := range m {
+		delete(m, k)
+	}
+}
+
+// OverlapCoefficient computes the overlap coefficient between two strings
+// using multi-representation homoglyph character bigrams.
+// Fully optimized for zero heap allocations, bitwise rune-packing, and zero GC pressure.
+func OverlapCoefficient(s1, s2 string) float64 {
+	if s1 == s2 {
+		return 1.0
+	}
+
+	if len(s1) < 2 || len(s2) < 2 {
+		return 0.0
+	}
+
+	bg1 := uint64MapPool.Get().(map[uint64]struct{})
+	bg2 := uint64MapPool.Get().(map[uint64]struct{})
+	defer func() {
+		clearMap(bg1)
+		uint64MapPool.Put(bg1)
+		clearMap(bg2)
+		uint64MapPool.Put(bg2)
+	}()
+
+	var lastRune rune
+	hasLast := false
+	for _, r := range s1 {
+		if !hasLast {
+			lastRune = r
+			hasLast = true
+			continue
+		}
+		repsA := getHomoglyphRepresentations(lastRune)
+		repsB := getHomoglyphRepresentations(r)
+		for _, charA := range repsA {
+			for _, charB := range repsB {
+				packed := (uint64(charA) << 32) | uint64(charB)
+				bg1[packed] = struct{}{}
+			}
+		}
+		lastRune = r
+	}
+
+	intersection := 0
+	hasLast = false
+	for _, r := range s2 {
+		if !hasLast {
+			lastRune = r
+			hasLast = true
+			continue
+		}
+		repsA := getHomoglyphRepresentations(lastRune)
+		repsB := getHomoglyphRepresentations(r)
+		for _, charA := range repsA {
+			for _, charB := range repsB {
+				packed := (uint64(charA) << 32) | uint64(charB)
+				if _, ok := bg2[packed]; !ok {
+					bg2[packed] = struct{}{}
+					if _, exists := bg1[packed]; exists {
+						intersection++
+					}
+				}
+			}
+		}
+		lastRune = r
+	}
+
+	if len(bg1) == 0 || len(bg2) == 0 {
+		return 0.0
+	}
+
+	minSize := len(bg1)
+	if len(bg2) < minSize {
+		minSize = len(bg2)
+	}
+
+	return float64(intersection) / float64(minSize)
+}
+
 func isRomanSequence(s string) bool {
 	if s == "" {
 		return false
