@@ -466,7 +466,7 @@ func SanitizeName(name string) string {
 	s = conjoinedLettersToDigits.ReplaceAllString(s, "$1 $2")
 	s = conjoinedDigitToCodec.ReplaceAllString(s, "$1 $2")
 
-	// Insert spaces before conjoined language tags (e.g. FromEng -> From Eng, FromTam -> From Tam)
+	// Insert spaces before conjoined language/region splitters (e.g. FromEng -> From Eng, FromTam -> From Tam, preventing F-rom collisions)
 	s = conjoinedLanguageRegex.ReplaceAllString(s, "$1 $2")
 
 	// Replace dot and underscore delimiters with standard spaces to prevent conjoined word parsing errors
@@ -540,7 +540,6 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 
 	var result *ParseResult
 	if m := dateEpisodeRegex.FindStringSubmatch(clean); len(m) == 4 {
-		dateStr := fmt.Sprintf("%s-%s-%s", m[1], m[2], m[3])
 		idx := strings.Index(clean, m[0])
 		titleStr := strings.Trim(strings.TrimSpace(clean[:idx]), " .-_")
 
@@ -891,3 +890,4 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
 	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "")
 }
+
