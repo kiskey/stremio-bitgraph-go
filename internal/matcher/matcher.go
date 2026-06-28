@@ -905,8 +905,10 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 }
 
 func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, altTitles []string, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
-	// Dynamically load the self-learning Entropy Engine exactly once on the first query execution.
-	// This eliminates startup circular dependency import cycles and cold-start latencies.
+	return FindBestSeriesStreamsLongRunning(ctx, tmdbShow, altTitles, season, episode, newTorrents, cachedRows, preferredLanguages, false, "")
+}
+
+func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, altTitles []string, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string, isLongRunning bool, airDate string) (streams []Stream, cachedStreams []Stream) {
 	entropyOnce.Do(func() {
 		utils.Logger.Info("Entropy Engine: Initiating self-learning parser scan...")
 		InitializeEntropyEngine(context.Background())
@@ -1010,9 +1012,9 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 				return nil
 			}
 
-			// SPEBC: Block older remakes by checking if the torrent year is older than the premiere year
+			// SPEBC: Block older remakes by checking if the torrent year is older than the premiere year (Skipped for Daily/LongRunning shows)
 			parsed := parser.RobustParseInfo(td.Name, 0)
-			if parsed.Year != 0 && tmdbShow.PublishedAt != "" {
+			if !isLongRunning && parsed.Year != 0 && tmdbShow.PublishedAt != "" {
 				premiereY, err := strconv.Atoi(tmdbShow.PublishedAt)
 				if err == nil {
 					if parsed.Year < premiereY-1 {
@@ -1049,7 +1051,25 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 			var local []Stream
 
+			matchedSeasonEpisodeOrDate := false
 			if parsed.Season == season || isMultiSeasonPack {
+				matchedSeasonEpisodeOrDate = true
+			} else if isLongRunning && airDate != "" {
+				parts := strings.Split(airDate, "-")
+				if len(parts) == 3 {
+					dotAirDate := fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
+					dashAirDate := airDate
+					spaceAirDate := fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
+					lowerName := strings.ToLower(td.Name)
+					if strings.Contains(lowerName, dotAirDate) || 
+					   strings.Contains(lowerName, dashAirDate) || 
+					   strings.Contains(lowerName, spaceAirDate) {
+						matchedSeasonEpisodeOrDate = true
+					}
+				}
+			}
+
+			if matchedSeasonEpisodeOrDate {
 				if td.FilesStatus == "single" {
 					matched := false
 					if parsed.Episode == episode {
@@ -1058,6 +1078,20 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 					// Dynamic single-file range validation (Sonarr/Radarr compatible fallback)
 					if !matched && parser.MatchRange(td.Name, episode) {
 						matched = true
+					}
+					if !matched && isLongRunning && airDate != "" {
+						parts := strings.Split(airDate, "-")
+						if len(parts) == 3 {
+							dotAirDate := fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
+							dashAirDate := airDate
+							spaceAirDate := fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
+							lowerName := strings.ToLower(td.Name)
+							if strings.Contains(lowerName, dotAirDate) || 
+							   strings.Contains(lowerName, dashAirDate) || 
+							   strings.Contains(lowerName, spaceAirDate) {
+								matched = true
+							}
+						}
 					}
 					if !matched {
 						return nil
@@ -1088,7 +1122,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 							})
 						}
 					}
-					if bestFile, found := parser.FindBestSeriesFile(candidates, season, episode, parsed.Season); found {
+					if bestFile, found := parser.FindBestSeriesFileLongRunning(candidates, season, episode, parsed.Season, airDate); found {
 						local = append(local, Stream{
 							InfoHash:    t.InfoHash,
 							FileIndex:   bestFile.ID,
@@ -1104,7 +1138,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 			}
 
 			if len(local) > 0 {
-				// Register matched filename dynamically to update Entropy Engine weights
 				UpdateEntropyToken(td.Name)
 				results <- jobResult{streams: local}
 			}
@@ -1124,7 +1157,6 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 }
 
 func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, altTitles []string, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
-	// Dynamically load the self-learning Entropy Engine exactly once on the first query execution.
 	entropyOnce.Do(func() {
 		utils.Logger.Info("Entropy Engine: Initiating self-learning parser scan...")
 		InitializeEntropyEngine(context.Background())
