@@ -93,39 +93,89 @@ func manifestHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(m)
 }
 
-func buildOptimizedQuery(name string, altTitles []string, suffix string) string {
-	// Clean colons, hyphens, and brackets from the query string to prevent FTS parser confusion (e.g. "From Dusk Till Dawn: The Series" -> "From Dusk Till Dawn The Series")
-	nameClean := queryReplacer.Replace(name)
-	nameClean = strings.ReplaceAll(nameClean, ":", " ")
-	nameClean = strings.ReplaceAll(nameClean, "-", " ")
-	nameClean = strings.ReplaceAll(nameClean, "(", " ")
-	nameClean = strings.ReplaceAll(nameClean, ")", " ")
-	nameClean = strings.Join(strings.Fields(nameClean), " ")
+// cleanQueryTitle removes punctuation that breaks PostgreSQL FTS tokenization.
+// We do NOT wrap in quotes - unquoted terms use implicit AND which is more forgiving.
+func cleanQueryTitle(name string) string {
+	s := queryReplacer.Replace(name)
+	s = strings.ReplaceAll(s, ":", " ")
+	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.ReplaceAll(s, "(", " ")
+	s = strings.ReplaceAll(s, ")", " ")
+	s = strings.ReplaceAll(s, ".", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	return s
+}
 
-	// Detect if the show name is a single word or short stop-word
-	isShortOrStopWord := len(strings.Fields(nameClean)) == 1
-
-	var query string
-	if isShortOrStopWord {
-		// Do not wrap in double quotes, and do not append FTS negation operators.
-		// This forces Bitmagnet to fall back natively to its plain-text "search_string" matching,
-		// preventing the stop-word "From" from being completely erased.
-		query = nameClean
-	} else {
-		// Do not wrap in double quotes to prevent overly restrictive phrasal queries.
-		// Unquoted terms allow websearch_to_tsquery to do implicit AND, ensuring broader matching
-		// and avoiding stop-word poisoning / ordering issues.
-		query = nameClean
+// buildQueryVariants generates multiple search query strings to maximize recall.
+// CRITICAL FIXES:
+// 1. NEVER append year to FTS query - year is absent from many torrent names and causes zero results
+// 2. NEVER wrap in double quotes - prevents <-> adjacency operator stop-word poisoning
+// 3. Use PostgreSQL websearch negation syntax "-" (not "!")
+// 4. Generate multiple episode format variants to handle scene naming differences
+func buildQueryVariants(metaName string, altTitles []string, season, episode int, contentType string) []string {
+	base := cleanQueryTitle(metaName)
+	if base == "" {
+		return nil
 	}
 
+	var variants []string
+	sPadded := fmt.Sprintf("S%02d", season)
+	ePadded := fmt.Sprintf("E%02d", episode)
+
+	// --- TV Show Variants ---
+	if contentType == "tv_show" && season > 0 && episode > 0 {
+		// Variant 1: Compact S07E22 (most common scene format)
+		variants = append(variants, fmt.Sprintf("%s %s%s", base, sPadded, ePadded))
+		// Variant 2: Spaced S07 EP22 (matches 1TamilMV, ETTV, etc.)
+		variants = append(variants, fmt.Sprintf("%s %s %s", base, sPadded, ePadded))
+		// Variant 3: S07 E22 (alternate spacing)
+		variants = append(variants, fmt.Sprintf("%s %s E%02d", base, sPadded, episode))
+		// Variant 4: Season 7 Episode 22 (verbose format)
+		variants = append(variants, fmt.Sprintf("%s Season %d Episode %d", base, season, episode))
+		// Variant 5: Season pack broad query (no episode)
+		variants = append(variants, fmt.Sprintf("%s %s", base, sPadded))
+		// Variant 6: Title-only broad fallback (catches packs and mislabeled episodes)
+		variants = append(variants, base)
+	} else {
+		// Movie or unknown episode
+		variants = append(variants, base)
+	}
+
+	// Add alt titles as separate variants (without episode specs for broader matching)
+	for _, alt := range altTitles {
+		altClean := cleanQueryTitle(alt)
+		if altClean != "" && altClean != base {
+			variants = append(variants, altClean)
+		}
+	}
+
+	// Append negation keywords to ALL variants using CORRECT PostgreSQL syntax "-"
+	if len(config.NegateKeywords) > 0 {
+		var negations []string
+		for _, k := range config.NegateKeywords {
+			negations = append(negations, fmt.Sprintf("-%s", queryReplacer.Replace(k)))
+		}
+		negationSuffix := strings.Join(negations, " ")
+		for i := range variants {
+			variants[i] = variants[i] + " " + negationSuffix
+		}
+	}
+
+	return variants
+}
+
+// DEPRECATED: Kept for backward compatibility during transition.
+// Use buildQueryVariants for all new code.
+func buildOptimizedQuery(name string, altTitles []string, suffix string) string {
+	nameClean := cleanQueryTitle(name)
+
+	query := nameClean
 	if suffix != "" {
 		suffixClean := queryReplacer.Replace(suffix)
 		query = fmt.Sprintf("%s %s", query, suffixClean)
 	}
 
-	// Append FTS Negation Keywords only for standard, non-stop-word titles
-	// Uses PostgreSQL websearch negation syntax ("-") instead of the broken "!" operator
-	if !isShortOrStopWord && len(config.NegateKeywords) > 0 {
+	if len(config.NegateKeywords) > 0 {
 		var negations []string
 		for _, k := range config.NegateKeywords {
 			negations = append(negations, fmt.Sprintf("-%s", queryReplacer.Replace(k)))
@@ -202,14 +252,11 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				torrents = cachedVal.([]bitmagnet.TorrentItem)
 				return
 			}
-			query := buildOptimizedQuery(meta.Name, meta.AltTitles, meta.Year)
+			// CRITICAL FIX: Do NOT append year to movie query.
+			// The matcher handles year filtering post-search.
+			// Year in FTS query excludes torrents that don't have year in filename.
+			query := buildOptimizedQuery(meta.Name, meta.AltTitles, "")
 			torrents, searchErr = bitmagnet.SearchTorrents(ctx, query, contentType, 100)
-			// Fallback Search Strategy (Stage 2): If year-scoped search returned 0 results, query again without the year suffix
-			if searchErr == nil && len(torrents) == 0 && meta.Year != "" {
-				utils.Logger.Info("movie search with year returned 0 results, running fallback search without year", "title", meta.Name)
-				fallbackQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, "")
-				torrents, searchErr = bitmagnet.SearchTorrents(ctx, fallbackQuery, contentType, 100)
-			}
 			if searchErr == nil && len(torrents) > 0 {
 				searchCache.Set(searchCacheKey, torrents)
 			}
@@ -249,6 +296,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
+		// --- SERIES SEARCH (COMPLETE REPLACEMENT) ---
 		if debrid.LoadProvider().IsEnabled() && config.DebridProvider != "" {
 			rows, err := db.Pool.QueryContext(ctx,
 				"SELECT infohash, torrent_info_json, language, quality, seeders FROM torrents WHERE tmdb_id = ?1 AND content_type = ?2 AND torrent_info_json IS NOT NULL AND provider = ?3",
@@ -272,106 +320,55 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+
+		// Generate multiple query variants to maximize recall
+		queryVariants := buildQueryVariants(meta.Name, meta.AltTitles, season, episode, contentType)
+		utils.Logger.Info("generated search variants", "count", len(queryVariants), "variants", queryVariants)
+
+		var allTorrents []bitmagnet.TorrentItem
+		seenHashes := make(map[string]bool)
+		var mu sync.Mutex
+
+		// Execute all variants with a worker pool (max 3 concurrent to avoid overwhelming Bitmagnet)
+		g, gCtx := errgroup.WithContext(ctx)
+		sem := semaphore.NewWeighted(3)
+
+		for _, qv := range queryVariants {
+			qv := qv // capture range variable
+			g.Go(func() error {
+				if err := sem.Acquire(gCtx, 1); err != nil {
+					return err
+				}
+				defer sem.Release(1)
+
+				// Search WITHOUT contentType filter to maximize recall across all classified types
+				results, err := bitmagnet.SearchTorrents(gCtx, qv, "", 50)
+				if err == nil && len(results) > 0 {
+					mu.Lock()
+					for _, t := range results {
+						if !seenHashes[t.InfoHash] {
+							allTorrents = append(allTorrents, t)
+							seenHashes[t.InfoHash] = true
+						}
+					}
+					mu.Unlock()
+				}
+				return nil
+			})
+		}
+
+		_ = g.Wait()
+		torrents = allTorrents
+		utils.Logger.Info("total unique torrents after variant search", "count", len(torrents))
 	}
 
 	var resultStreams, cachedStreams []matcher.Stream
 	if typ == "series" {
-		sVal := season
-		var sPadded string
-		if sVal < 10 {
-			sPadded = fmt.Sprintf("S0%d", sVal)
-		} else {
-			sPadded = fmt.Sprintf("S%d", sVal)
-		}
-
-		var refinedTorrents, broadTorrents []bitmagnet.TorrentItem
-		g, gCtx := errgroup.WithContext(ctx)
-
-		// Refined Query: Combines target show title, episode block, and premiere year (e.g. From S02E09 2022)
-		// This forces PostgreSQL FTS to filter strictly by your show's launch year, preventing stop-word failures.
-		g.Go(func() error {
-			suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
-			if meta.Year != "" {
-				suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
-			}
-			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
-			var innerErr error
-			refinedTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, refinedQuery, "tv_show", 50)
-			return innerErr
-		})
-
-		// Broad Query: Combines target show title, season block, and premiere year (e.g. From S02 2022)
-		// Guarantees that complete season packs are returned even if the FTS strips the show's name.
-		g.Go(func() error {
-			suffix := sPadded
-			if meta.Year != "" {
-				suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
-			}
-			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
-			var innerErr error
-			broadTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, broadQuery, "tv_show", 100)
-			return innerErr
-		})
-
-		_ = g.Wait()
-
-		// Fallback Search Strategy (Stage 2): If year-scoped queries returned 0 results, repeat both queries without the year suffix
-		if len(refinedTorrents) == 0 && len(broadTorrents) == 0 && meta.Year != "" {
-			utils.Logger.Info("series search with year returned 0 results, running fallback searches without year", "title", meta.Name)
-			gFallback, gFallbackCtx := errgroup.WithContext(ctx)
-			
-			gFallback.Go(func() error {
-				suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
-				refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
-				var innerErr error
-				refinedTorrents, innerErr = bitmagnet.SearchTorrents(gFallbackCtx, refinedQuery, "tv_show", 50)
-				return innerErr
-			})
-			
-			gFallback.Go(func() error {
-				suffix := sPadded
-				broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
-				var innerErr error
-				broadTorrents, innerErr = bitmagnet.SearchTorrents(gFallbackCtx, broadQuery, "tv_show", 100)
-				return innerErr
-			})
-			
-			_ = gFallback.Wait()
-		}
-
 		// Pass the retrieved primary title & its compiled alternate titles list to the matcher.
 		// We use PublishedAt inside TorrentItem as a zero-allocation vector to pass the premiere year.
-		refinedResult, refinedCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, meta.AltTitles, season, episode, refinedTorrents, cachedRows, config.PreferredLanguages)
-		resultStreams = refinedResult
-		cachedStreams = refinedCached
-
-		if len(refinedTorrents) < 10 || len(resultStreams) == 0 {
-			broadResult, broadCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, meta.AltTitles, season, episode, broadTorrents, cachedRows, config.PreferredLanguages)
-			existing := make(map[string]bool)
-			for _, s := range resultStreams {
-				existing[s.InfoHash] = true
-			}
-			for _, s := range broadResult {
-				if !existing[s.InfoHash] {
-					resultStreams = append(resultStreams, s)
-					existing[s.InfoHash] = true
-				}
-			}
-			existingCached := make(map[string]bool)
-			for _, s := range cachedStreams {
-				existingCached[s.InfoHash] = true
-			}
-			for _, s := range broadCached {
-				if !existingCached[s.InfoHash] {
-					cachedStreams = append(cachedStreams, s)
-					existingCached[s.InfoHash] = true
-				}
-			}
-		}
+		resultStreams, cachedStreams = matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, meta.AltTitles, season, episode, torrents, cachedRows, config.PreferredLanguages)
 	} else {
-		movieResult, movieCached := matcher.FindBestMovieStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, meta.AltTitles, meta.Year, torrents, cachedRows, config.PreferredLanguages)
-		resultStreams = movieResult
-		cachedStreams = movieCached
+		resultStreams, cachedStreams = matcher.FindBestMovieStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, meta.AltTitles, meta.Year, torrents, cachedRows, config.PreferredLanguages)
 	}
 
 	sorted := matcher.SortAndFilterStreams(resultStreams, cachedStreams, config.PreferredLanguages)
