@@ -22,7 +22,6 @@ var (
 	traktClient    *http.Client
 	metaCache      = utils.NewTTLCache(12 * time.Hour)
 	yearRegexp     = regexp.MustCompile(`\d{4}`)
-	imdbToTmdbID   = utils.NewTTLCache(7 * 24 * time.Hour)
 )
 
 func init() {
@@ -34,37 +33,37 @@ func init() {
 	}
 }
 
-type SeasonInfo struct {
-	SeasonNumber int `json:"season_number"`
-	EpisodeCount int `json:"episode_count"`
-}
-
 type MetaResult struct {
 	Name      string
 	Year      string
 	Source    string
 	AltTitles []string
-	Type      string
-	Seasons   []SeasonInfo
+	TMDBID    string // Added for absolute ID references on long-running show details
 }
 
-type EpisodeMeta struct {
-	AirDate string `json:"air_date"`
+type TVSeasonResult struct {
+	Episodes []TVEpisode `json:"episodes"`
+}
+
+type TVEpisode struct {
+	EpisodeNumber int    `json:"episode_number"`
+	AirDate       string `json:"air_date"`
+	Name          string `json:"name"`
 }
 
 // Low-Allocation Structs for TMDB Deserialization
 type tmdbFindResponse struct {
 	MovieResults []struct {
-		Title         string `json:"title"`
-		ReleaseDate   string `json:"release_date"`
-		OriginalTitle string `json:"original_title"`
-		ID            int    `json:"id"`
+		ID            json.Number `json:"id"`
+		Title         string      `json:"title"`
+		ReleaseDate   string      `json:"release_date"`
+		OriginalTitle string      `json:"original_title"`
 	} `json:"movie_results"`
 	TvResults []struct {
-		Name         string `json:"name"`
-		FirstAirDate string `json:"first_air_date"`
-		OriginalName string `json:"original_name"`
-		ID            int    `json:"id"`
+		ID            json.Number `json:"id"`
+		Name          string      `json:"name"`
+		FirstAirDate  string      `json:"first_air_date"`
+		OriginalName  string      `json:"original_name"`
 	} `json:"tv_results"`
 }
 
@@ -149,13 +148,12 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 			return nil, err
 		}
 
-		name, year := "", ""
+		name, year, tmdbID := "", "", ""
 		var altTitles []string
-		contentType := "movie"
-		var seasons []SeasonInfo
-
-		if len(data.TvResults) > 0 {
-			contentType = "series"
+		if typ == "series" {
+			if len(data.TvResults) == 0 {
+				return nil, fmt.Errorf("not found")
+			}
 			item := data.TvResults[0]
 			name = item.Name
 			if len(item.FirstAirDate) >= 4 {
@@ -164,31 +162,11 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 			if item.OriginalName != "" && item.OriginalName != name {
 				altTitles = append(altTitles, item.OriginalName)
 			}
-			imdbToTmdbID.Set(imdbID, item.ID)
-
-			// Fetch detailed TV show info in the same high-level call to enrich seasons list
-			tvURL := fmt.Sprintf("https://api.themoviedb.org/3/tv/%d?api_key=%s", item.ID, config.TmdbAPIKey)
-			tvReq, _ := http.NewRequestWithContext(reqCtx, "GET", tvURL, nil)
-			tvResp, tvErr := tmdbClient.Do(tvReq)
-			if tvErr == nil && tvResp.StatusCode == 200 {
-				defer tvResp.Body.Close()
-				var tvDetails struct {
-					Seasons []struct {
-						SeasonNumber int `json:"season_number"`
-						EpisodeCount int `json:"episode_count"`
-					} `json:"seasons"`
-				}
-				if err := json.NewDecoder(tvResp.Body).Decode(&tvDetails); err == nil {
-					for _, s := range tvDetails.Seasons {
-						seasons = append(seasons, SeasonInfo{
-							SeasonNumber: s.SeasonNumber,
-							EpisodeCount: s.EpisodeCount,
-						})
-					}
-				}
+			tmdbID = item.ID.String()
+		} else {
+			if len(data.MovieResults) == 0 {
+				return nil, fmt.Errorf("not found")
 			}
-		} else if len(data.MovieResults) > 0 {
-			contentType = "movie"
 			item := data.MovieResults[0]
 			name = item.Title
 			if len(item.ReleaseDate) >= 4 {
@@ -197,18 +175,10 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 			if item.OriginalTitle != "" && item.OriginalTitle != name {
 				altTitles = append(altTitles, item.OriginalTitle)
 			}
-		} else {
-			return nil, fmt.Errorf("not found")
+			tmdbID = item.ID.String()
 		}
 
-		return &MetaResult{
-			Name:      name,
-			Year:      year,
-			Source:    "TMDB",
-			AltTitles: altTitles,
-			Type:      contentType,
-			Seasons:   seasons,
-		}, nil
+		return &MetaResult{Name: name, Year: year, Source: "TMDB", AltTitles: altTitles, TMDBID: tmdbID}, nil
 	})
 }
 
@@ -260,12 +230,7 @@ func fetchCinemeta(ctx context.Context, imdbID, typ string) (*MetaResult, error)
 			}
 		}
 
-		contentType := "movie"
-		if typ == "series" {
-			contentType = "series"
-		}
-
-		return &MetaResult{Name: meta.Name, Year: match, Source: "Cinemeta", AltTitles: altTitles, Type: contentType}, nil
+		return &MetaResult{Name: meta.Name, Year: match, Source: "Cinemeta", AltTitles: altTitles}, nil
 	})
 }
 
@@ -298,7 +263,7 @@ func fetchOmdb(ctx context.Context, imdbID string) (*MetaResult, error) {
 		if year != "" {
 			year = strings.Split(year, "–")[0]
 		}
-		return &MetaResult{Name: data.Title, Year: year, Source: "OMDb", AltTitles: nil, Type: "movie"}, nil
+		return &MetaResult{Name: data.Title, Year: year, Source: "OMDb", AltTitles: nil}, nil
 	})
 }
 
@@ -346,12 +311,63 @@ func fetchTrakt(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 		if y, ok := item["year"].(float64); ok {
 			year = fmt.Sprintf("%.0f", y)
 		}
-		contentType := "movie"
-		if typ == "series" {
-			contentType = "series"
-		}
-		return &MetaResult{Name: name, Year: year, Source: "Trakt", AltTitles: nil, Type: contentType}, nil
+		return &MetaResult{Name: name, Year: year, Source: "Trakt", AltTitles: nil}, nil
 	})
+}
+
+func ResolveTMDBID(ctx context.Context, imdbID, typ string) (string, error) {
+	url := fmt.Sprintf("https://api.themoviedb.org/3/find/%s?api_key=%s&external_source=imdb_id", imdbID, config.TmdbAPIKey)
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := tmdbClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("tmdb find status %d", resp.StatusCode)
+	}
+
+	var data tmdbFindResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", err
+	}
+
+	if typ == "series" {
+		if len(data.TvResults) > 0 {
+			return data.TvResults[0].ID.String(), nil
+		}
+	} else {
+		if len(data.MovieResults) > 0 {
+			return data.MovieResults[0].ID.String(), nil
+		}
+	}
+	return "", fmt.Errorf("tmdb id not found")
+}
+
+func GetTVSeasonDetails(ctx context.Context, tmdbID string, seasonNumber int) (*TVSeasonResult, error) {
+	cacheKey := fmt.Sprintf("tv_season_%s_%d", tmdbID, seasonNumber)
+	if v, ok := metaCache.Get(cacheKey); ok {
+		return v.(*TVSeasonResult), nil
+	}
+
+	url := fmt.Sprintf("https://api.themoviedb.org/3/tv/%s/season/%d?api_key=%s", tmdbID, seasonNumber, config.TmdbAPIKey)
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := tmdbClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("tmdb season status %d", resp.StatusCode)
+	}
+
+	var result TVSeasonResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	metaCache.Set(cacheKey, &result)
+	return &result, nil
 }
 
 func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
@@ -431,54 +447,4 @@ func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error
 
 	utils.Logger.Error("failed to resolve metadata", "imdb", imdbID)
 	return nil, fmt.Errorf("all metadata providers failed")
-}
-
-func GetEpisodeDetails(ctx context.Context, imdbID string, season, episode int) (*EpisodeMeta, error) {
-	cacheKey := fmt.Sprintf("ep_%s_%d_%d", imdbID, season, episode)
-	if v, ok := metaCache.Get(cacheKey); ok {
-		return v.(*EpisodeMeta), nil
-	}
-
-	var tvID int
-	if cachedID, ok := imdbToTmdbID.Get(imdbID); ok {
-		tvID = cachedID.(int)
-	} else {
-		url := fmt.Sprintf("https://api.themoviedb.org/3/find/%s?api_key=%s&external_source=imdb_id", imdbID, config.TmdbAPIKey)
-		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-		resp, err := tmdbClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode == 200 {
-			var data tmdbFindResponse
-			if err := json.NewDecoder(resp.Body).Decode(&data); err == nil && len(data.TvResults) > 0 {
-				tvID = data.TvResults[0].ID
-				imdbToTmdbID.Set(imdbID, tvID)
-			}
-		}
-	}
-
-	if tvID == 0 {
-		return nil, fmt.Errorf("could not find TMDB TV ID for IMDb %s", imdbID)
-	}
-
-	epURL := fmt.Sprintf("https://api.themoviedb.org/3/tv/%d/season/%d/episode/%d?api_key=%s", tvID, season, episode, config.TmdbAPIKey)
-	req, _ := http.NewRequestWithContext(ctx, "GET", epURL, nil)
-	resp, err := tmdbClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("episode details API status %d", resp.StatusCode)
-	}
-
-	var epDetails EpisodeMeta
-	if err := json.NewDecoder(resp.Body).Decode(&epDetails); err != nil {
-		return nil, err
-	}
-
-	metaCache.Set(cacheKey, &epDetails)
-	return &epDetails, nil
 }
