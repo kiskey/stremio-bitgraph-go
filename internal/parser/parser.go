@@ -114,8 +114,8 @@ var regionalSingleRegex = regexp.MustCompile(`(?i)\b(?:season|s|series)\s*(\d+)\
 var conjoinedRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)(\d+)(?:e|ep|episode)(\d+)\b`)
 var compactRegex = regexp.MustCompile(`(?i)\bE(\d{2})(\d{2})\b`)
 
-// Radarr/Sonarr Website Domain Prefix Stripper - Upgraded to fully match changing subdomains, domain names, and TLDs with or without www
-var websitePrefixRegex = regexp.MustCompile(`(?i)(?:^|[\s_.-]*)(?:(?:www\d*\.)?[a-z0-9-]+\.[a-z]{2,6}\b|\[\s*(?:www\d*\.)?[a-z0-9-]+\.[a-z]{2,6}\s*\])[\s_.-]*`)
+// Radarr/Sonarr Website Domain Prefix Stripper - Upgraded to safely exclude movie titles matching [a-z0-9-]+\.[a-z]{2,6} by limiting allowed TLD extensions
+var websitePrefixRegex = regexp.MustCompile(`(?i)(?:^|[\s_.-]*)(?:(?:www\d*\.)[a-z0-9-]+\.[a-z]{2,6}\b|\[\s*(?:www\d*\.)?[a-z0-9-]+\.[a-z]{2,6}\s*\]|[a-z0-9-]+\.(?:com|net|org|co|info|yt|tf|re|pm|club|xyz|site|online|me|tv|cc|ws|to|biz|us|uk|ca|in|app|link|io|ag|am|cat|best|release|pe|wf|cx|gd|la|mu|ms|nu|se|tc|vc|vg)\b)[\s_.-]*`)
 
 // Conjoined metadata regexes with strict lower-bounds of 3 characters to prevent short-word collisions (e.g. Scratch1080p, Scratchx264, S01WEBRip)
 var conjoinedQualityRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
@@ -194,14 +194,22 @@ var filtersDef = []struct {
 	{"s-hulu", "gs", "HULU", `(?i)\bhulu\b`, nil},
 	{"s-pcok", "gs", "PEACOCK", `(?i)\b(?:pcok|peacock)\b`, nil},
 	{"s-pamp", "gs", "PARAMOUNT+", `(?i)\b(?:pmtp|pamp|paramount\+?|paramount[\s._-]?plus)\b`, nil},
-	{"s-croll", "gs", "CRUNCHYROLL", `(?i)\b(?:crunchyroll|crunch)\b`, nil},
-
-	// Encoder
-	{"s-h265", "ge", "H265 HEVC", `(?i)\b(?:x265|h[._-]?265|hevc)\b`, nil},
-	{"s-h264", "ge", "H264 AVC", `(?i)\b(?:x264|h[._-]?264|avc)\b`, nil},
+	{"s-croll", "gs", "CRUNCHYROLL", `(?i)\b(?:croll|crunchy|crunchyroll)\b`, nil},
 }
 
-var CompiledFilters []BadgeFilter
+func init() {
+	for _, f := range filtersDef {
+		var posNeg BadgeFilter
+		posNeg.ID = f.ID
+		posNeg.GroupID = f.GroupID
+		posNeg.Name = f.Name
+		posNeg.Positive = regexp.MustCompile(f.Positive)
+		for _, n := range f.Negatives {
+			posNeg.Negatives = append(posNeg.Negatives, regexp.MustCompile(n))
+		}
+		CompiledFilters = append(CompiledFilters, posNeg)
+	}
+}
 
 // Thread-safe Parse Cache to eliminate duplicate parsing latency
 type parseCacheEntry struct {
@@ -214,23 +222,7 @@ var (
 	parseCacheMu sync.RWMutex
 )
 
-func init() {
-	CompiledFilters = make([]BadgeFilter, len(filtersDef))
-	for i, f := range filtersDef {
-		var negatives []*regexp.Regexp
-		for _, negPat := range f.Negatives {
-			negatives = append(negatives, regexp.MustCompile(negPat))
-		}
-
-		CompiledFilters[i] = BadgeFilter{
-			ID:        f.ID,
-			GroupID:   f.GroupID,
-			Name:      f.Name,
-			Positive:  regexp.MustCompile(f.Positive),
-			Negatives: negatives,
-		}
-	}
-}
+var CompiledFilters []BadgeFilter
 
 // ParsePackOrRange checks if a torrent name is a complete pack or contains an episode range
 func ParsePackOrRange(name string, targetE int) (isPack bool, startE int, endE int, hasRange bool) {
@@ -890,4 +882,3 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
 	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "")
 }
-
