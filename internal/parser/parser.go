@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 
 	rtp "github.com/ovrlord-app/releasetitleparser"
@@ -98,6 +100,43 @@ var bracketRegex = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
 var rangeRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)?\s*(\d+)\s*(?:-|to)\s*(?:e|ep|episode)?\s*(\d+)\b`)
 var seasonFolderRegex = regexp.MustCompile(`(?i)\b(?:s|season|series)\s*0*(\d+)\b`)
 
+// Pre-compiled regexes for RobustParseInfo safety fallback
+var sxeRegex = regexp.MustCompile(`(?i)\bS(\d+)\s*E(\d+)\b`)
+var crossRegex = regexp.MustCompile(`(?i)\b(\d+)\s*x\s*(\d+)\b`)
+var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to)\s*0*(\d+)\b`)
+
+// Regional patterns for TamilMV/TamilBlasters indexer formats
+var regionalRangeRegex = regexp.MustCompile(`(?i)\b(?:season|s|series)\s*(\d+)\s*(?:ep|episode|e)?\s*[\(\[]?\s*(\d+)\s*(?:-|to)\s*(\d+)\s*[\)\]]?\b`)
+var regionalSingleRegex = regexp.MustCompile(`(?i)\b(?:season|s|series)\s*(\d+)\s*(?:ep|episode|e)\s*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
+
+// Precompiled multi-episode structures for advanced range processing (Sonarr/Radarr compatible)
+var conjoinedRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)(\d+)(?:e|ep|episode)(\d+)\b`)
+var compactRegex = regexp.MustCompile(`(?i)\bE(\d{2})(\d{2})\b`)
+
+// Radarr/Sonarr Website Domain Prefix Stripper - Upgraded to fully match changing subdomains, domain names, and TLDs with or without www
+var websitePrefixRegex = regexp.MustCompile(`(?i)(?:^|[\s_.-]*)(?:(?:www\d*\.)?[a-z0-9-]+\.[a-z]{2,6}\b|\[\s*(?:www\d*\.)?[a-z0-9-]+\.[a-z]{2,6}\s*\])[\s_.-]*`)
+
+// Conjoined metadata regexes with strict lower-bounds of 3 characters to prevent short-word collisions (e.g. Scratch1080p, Scratchx264, S01WEBRip)
+var conjoinedQualityRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
+var conjoinedCodecRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(x264|x265|h264|h265|hevc|avc)\b`)
+var conjoinedSourceRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(dlrip|webrip|webdl|bluray|hdtv|bdrip|brrip)\b`)
+var conjoinedSeasonRegex = regexp.MustCompile(`(?i)\b(S\d+)(webrip|webdl|bluray|hdtv|bdrip|brrip|x264|x265|h264|h265|2160p|1080p|720p|4k|uhd)\b`)
+
+// Conjoined audio regexes with strict lower-bounds of 3 characters
+var conjoinedAudioDigitsRegex = regexp.MustCompile(`(?i)\b(\d+)(dts|ac3|aac|mp3)\b`)
+var conjoinedAudioAlphaRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(dts|ac3|aac|mp3)\b`)
+
+// Conjoined alphanumeric splitters to separate squashed numbers and letters natively (e.g. 2007mp4 -> 2007 mp4, 300FLAiTE -> 300 FLAiTE)
+var conjoinedDigitToLetters = regexp.MustCompile(`(?i)\b(\d+)([a-z]{2,})\b`)
+var conjoinedLettersToDigits = regexp.MustCompile(`(?i)\b([a-z]{2,})(\d+)\b`)
+var conjoinedDigitToCodec = regexp.MustCompile(`(?i)\b(\d+)(x264|x265|h264|h265|hevc|avc|webrip|webdl|bluray|hdtv|bdrip|brrip|2160p|1080p|720p|4k|uhd)\b`)
+
+// Conjoined language/region splitters with strict lower-bounds of 3 characters (e.g. FromEng -> From Eng, FromTam -> From Tam, preventing F-rom collisions)
+var conjoinedLanguageRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(eng|tam|tel|hin|ger|spa|fre|ita|rus|jap|chi|kor|dut|pol|cze|hun|rom|bul|ukr|gre|tur|ara|tha|vie|heb|per|ben)\b`)
+
+// Unified metadata boundary pattern to slice titles cleanly at the earliest occurrence of any noise/season tags (Including standard audio codecs)
+var boundaryRegex = regexp.MustCompile(`(?i)\b(?:S\d+E\d+|S\d+|\d+x\d+|Season\s*\d+|Seasons\s*\d+|2160p|1080p|720p|480p|360p|4k|uhd|bluray|hdtv|web[-_.]?dl|webrip|hdr|sdr|h264|h265|x264|x265|hevc|ddp|dd\+|eac3|truehd|atmos|ac3|dts|aac|mp3|flac|19\d{2}|20\d{2})\b`)
+
 // Low-Allocation pre-defined filters deconstructed from Perl badges.json to RE2 standard.
 // Matches exactly all 39 filters defined in badges.json with extended support for NF and AMZN.
 var filtersDef = []struct {
@@ -163,6 +202,17 @@ var filtersDef = []struct {
 
 var CompiledFilters []BadgeFilter
 
+// Thread-safe Parse Cache to eliminate duplicate parsing latency
+type parseCacheEntry struct {
+	result    *ParseResult
+	expiresAt time.Time
+}
+
+var (
+	parseCache   = make(map[string]parseCacheEntry)
+	parseCacheMu sync.RWMutex
+)
+
 func init() {
 	CompiledFilters = make([]BadgeFilter, len(filtersDef))
 	for i, f := range filtersDef {
@@ -188,14 +238,101 @@ func ParsePackOrRange(name string, targetE int) (isPack bool, startE int, endE i
 		return true, 0, 0, false
 	}
 
-	if match := rangeRegex.FindStringSubmatch(name); len(match) >= 3 {
-		start, _ := strconv.Atoi(match[1])
-		end, _ := strconv.Atoi(match[2])
-		if targetE >= start && targetE <= end {
+	if MatchRange(name, targetE) {
+		if match := rangeRegex.FindStringSubmatch(name); len(match) >= 3 {
+			start, _ := strconv.Atoi(match[1])
+			end, _ := strconv.Atoi(match[2])
+			return false, start, end, true
+		}
+		if match := regionalRangeRegex.FindStringSubmatch(name); len(match) >= 4 {
+			start, _ := strconv.Atoi(match[2])
+			end, _ := strconv.Atoi(match[3])
+			return false, start, end, true
+		}
+		if match := conjoinedRegex.FindStringSubmatch(name); len(match) >= 3 {
+			start, _ := strconv.Atoi(match[1])
+			end, _ := strconv.Atoi(match[2])
+			return false, start, end, true
+		}
+		if match := compactRegex.FindStringSubmatch(name); len(match) >= 3 {
+			start, _ := strconv.Atoi(match[1])
+			end, _ := strconv.Atoi(match[2])
 			return false, start, end, true
 		}
 	}
 	return false, 0, 0, false
+}
+
+// MatchRange checks if a string contains any episode range or multi-episode format covering the target episode.
+// This is fully optimized and inspired by advanced Sonarr/Radarr parsing patterns.
+func MatchRange(path string, targetEpisode int) bool {
+	// Extract base filename to prevent parent folder names from polluting range analysis
+	fileName := path
+	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
+		fileName = path[idx+1:]
+	}
+
+	// 1. Standard Range Pattern: ep01-05, E01-E05, episodes 1 to 5, etc.
+	matches := rangeRegex.FindAllStringSubmatchIndex(fileName, -1)
+	for _, match := range matches {
+		if len(match) >= 6 {
+			startNumStart := match[2]
+			startNumEnd := match[3]
+			endNumStart := match[4]
+			endNumEnd := match[5]
+
+			// Skip matches that are part of decimal numbers (e.g. 13.00-14.00)
+			if startNumStart > 0 && isDecimalDot(fileName, startNumStart-1) {
+				continue
+			}
+			if endNumEnd < len(fileName) && isDecimalDot(fileName, endNumEnd) {
+				continue
+			}
+
+			start, err1 := strconv.Atoi(fileName[startNumStart:startNumEnd])
+			end, err2 := strconv.Atoi(fileName[endNumStart:endNumEnd])
+			if err1 == nil && err2 == nil {
+				if start <= end && targetEpisode >= start && targetEpisode <= end {
+					return true
+				}
+			}
+		}
+	}
+
+	// 2. Regional Range Pattern: Season 01 EP(01-08), Season 01 Ep 01 to 08
+	if match := regionalRangeRegex.FindStringSubmatch(fileName); len(match) >= 4 {
+		start, err1 := strconv.Atoi(match[2])
+		end, err2 := strconv.Atoi(match[3])
+		if err1 == nil && err2 == nil {
+			if start <= end && targetEpisode >= start && targetEpisode <= end {
+				return true
+			}
+		}
+	}
+
+	// 3. Conjoined Range Pattern: S01E01E03, ep01ep03, E01E02, ep1ep5
+	if match := conjoinedRegex.FindStringSubmatch(fileName); len(match) >= 3 {
+		start, err1 := strconv.Atoi(match[1])
+		end, err2 := strconv.Atoi(match[2])
+		if err1 == nil && err2 == nil {
+			if start <= end && targetEpisode >= start && targetEpisode <= end {
+				return true
+			}
+		}
+	}
+
+	// 4. Compact Double Episode Pattern: S01E0102, S01E0304
+	if match := compactRegex.FindStringSubmatch(fileName); len(match) >= 3 {
+		start, err1 := strconv.Atoi(match[1])
+		end, err2 := strconv.Atoi(match[2])
+		if err1 == nil && err2 == nil {
+			if start <= end && targetEpisode >= start && targetEpisode <= end {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // FormatBadges scans the source filename exactly once and extracts matched tags.
@@ -310,7 +447,30 @@ func getQuality(res int) string {
 }
 
 func SanitizeName(name string) string {
-	s := name
+	// Strip Radarr/Sonarr-style Website Prefix Domains (e.g. www.1TamilMV.yt - or [TamilBlasters.gripe] ) before parsing
+	s := websitePrefixRegex.ReplaceAllString(name, "")
+
+	// Insert spaces before conjoined technical keywords to prevent unified word tokenization failures (e.g. Scratch1080p -> Scratch 1080p)
+	s = conjoinedQualityRegex.ReplaceAllString(s, "$1 $2")
+	s = conjoinedCodecRegex.ReplaceAllString(s, "$1 $2")
+	s = conjoinedSourceRegex.ReplaceAllString(s, "$1 $2")
+	s = conjoinedSeasonRegex.ReplaceAllString(s, "$1 $2")
+
+	// Insert spaces before conjoined audio tokens (e.g. 2009DTS -> 2009 DTS, AC3HELLYWOOD -> AC3 HELLYWOOD)
+	s = conjoinedAudioDigitsRegex.ReplaceAllString(s, "$1 $2")
+	s = conjoinedAudioAlphaRegex.ReplaceAllString(s, "$1 $2")
+
+	// Insert spaces between conjoined digits and letters (e.g. 2007mp4 -> 2007 mp4, 300FLAiTE -> 300 FLAiTE)
+	s = conjoinedDigitToLetters.ReplaceAllString(s, "$1 $2")
+	s = conjoinedLettersToDigits.ReplaceAllString(s, "$1 $2")
+	s = conjoinedDigitToCodec.ReplaceAllString(s, "$1 $2")
+
+	// Insert spaces before conjoined language tags (e.g. FromEng -> From Eng, FromTam -> From Tam)
+	s = conjoinedLanguageRegex.ReplaceAllString(s, "$1 $2")
+
+	// Replace dot and underscore delimiters with standard spaces to prevent conjoined word parsing errors
+	s = strings.ReplaceAll(s, ".", " ")
+	s = strings.ReplaceAll(s, "_", " ")
 
 	// 1. Replace non-breaking spaces (\u00a0, \u200b) to standard spaces
 	s = strings.ReplaceAll(s, "\u00a0", " ")
@@ -345,8 +505,16 @@ func SanitizeName(name string) string {
 }
 
 func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
+	parseCacheMu.RLock()
+	entry, ok := parseCache[title]
+	parseCacheMu.RUnlock()
+	if ok && time.Now().Before(entry.expiresAt) {
+		return entry.result
+	}
+
 	clean := SanitizeName(title)
 
+	var result *ParseResult
 	info := rtp.ParseSeriesTitle(clean)
 	if info != nil && (info.SeasonNumber != 0 || len(info.EpisodeNumbers) > 0) {
 		lang := "en"
@@ -357,7 +525,7 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 		if len(info.EpisodeNumbers) > 0 {
 			episode = info.EpisodeNumbers[0]
 		}
-		return &ParseResult{
+		result = &ParseResult{
 			Title:    info.SeriesTitle,
 			Season:   info.SeasonNumber,
 			Episode:  episode,
@@ -366,31 +534,115 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 			Quality:  getQuality(info.Quality.Quality.Resolution),
 			IsPack:   IsPack(info),
 		}
+	} else {
+		// High-performance unified POSIX fallback parsing engine
+		// This guarantees that we extract season/episode and pack details consistently
+		var parsedTitle string
+		var season, episode int
+		var isPack bool
+		found := false
+
+		// 1. Try to find standard SXXEXX pattern
+		if match := sxeRegex.FindStringSubmatchIndex(clean); len(match) >= 6 {
+			season, _ = strconv.Atoi(clean[match[2]:match[3]])
+			episode, _ = strconv.Atoi(clean[match[4]:match[5]])
+			parsedTitle = strings.TrimSpace(clean[:match[0]])
+			found = true
+		} else if match := regionalRangeRegex.FindStringSubmatchIndex(clean); len(match) >= 8 {
+			// 2. Try to find regional season and episode range (e.g. Season 1 EP(01-08))
+			season, _ = strconv.Atoi(clean[match[2]:match[3]])
+			episode, _ = strconv.Atoi(clean[match[4]:match[5]]) // Take first episode of the range
+			parsedTitle = strings.TrimSpace(clean[:match[0]])
+			found = true
+		} else if match := regionalSingleRegex.FindStringSubmatchIndex(clean); len(match) >= 6 {
+			// 3. Try to find regional season and single episode (e.g. Season 1 EP 02)
+			season, _ = strconv.Atoi(clean[match[2]:match[3]])
+			episode, _ = strconv.Atoi(clean[match[4]:match[5]])
+			parsedTitle = strings.TrimSpace(clean[:match[0]])
+			found = true
+		} else if match := crossRegex.FindStringSubmatchIndex(clean); len(match) >= 6 {
+			// 4. Try to find standard XXxXX pattern
+			season, _ = strconv.Atoi(clean[match[2]:match[3]])
+			episode, _ = strconv.Atoi(clean[match[4]:match[5]])
+			parsedTitle = strings.TrimSpace(clean[:match[0]])
+			found = true
+		} else if match := seasonRangeRegex.FindStringSubmatchIndex(clean); len(match) >= 6 {
+			// 5. Try to find season range packs (S01-S03)
+			season, _ = strconv.Atoi(clean[match[2]:match[3]]) // Take start season as default
+			isPack = true
+			parsedTitle = strings.TrimSpace(clean[:match[0]])
+			found = true
+		} else if match := seasonFolderRegex.FindStringSubmatchIndex(clean); len(match) >= 4 {
+			// 6. Try to find single season folder packs (S03 or Season 3)
+			season, _ = strconv.Atoi(clean[match[2]:match[3]])
+			isPack = true
+			parsedTitle = strings.TrimSpace(clean[:match[0]])
+			found = true
+		}
+
+		// 7. Clean up title slicing fallback using general boundary slicing if found
+		if found && parsedTitle != "" {
+			// Clean trailing symbols / delimiters from sliced title
+			parsedTitle = strings.Trim(parsedTitle, " .-_[]()/\\")
+			result = &ParseResult{
+				Title:    parsedTitle,
+				Season:   season,
+				Episode:  episode,
+				Language: "en",
+				Quality:  "sd",
+				IsPack:   isPack,
+			}
+		} else {
+			// Slicing Fallback: Scan the entire string and slice at the earliest boundary that is NOT at index 0 (which is the title itself)
+			// This prevents numeric titles (like "2012" or "300") from blocking metadata checks (such as "2009" or "2007") later in the file name.
+			var bestLoc []int
+			for _, loc := range boundaryRegex.FindAllStringIndex(clean, -1) {
+				if loc != nil && loc[0] > 0 {
+					if bestLoc == nil || loc[0] < bestLoc[0] {
+						bestLoc = loc
+					}
+				}
+			}
+
+			if bestLoc != nil {
+				slicedTitle := strings.Trim(clean[:bestLoc[0]], " .-_[]()/\\")
+				if slicedTitle != "" {
+					result = &ParseResult{
+						Title:    slicedTitle,
+						Season:   fallbackSeason,
+						Episode:  0,
+						Language: "en",
+						Quality:  "sd",
+					}
+				}
+			} else {
+				// Absolute raw fallback
+				result = &ParseResult{
+					Title:    clean,
+					Season:   fallbackSeason,
+					Episode:  0,
+					Language: "en",
+					Quality:  "sd",
+				}
+			}
+		}
 	}
 
-	movie := rtp.ParseMovieTitle(clean)
-	if movie != nil {
-		lang := "en"
-		if len(movie.Languages) > 0 {
-			lang = getISO(movie.Languages[0])
-		}
-		return &ParseResult{
-			Title:    movie.PrimaryMovieTitle(),
-			Season:   0,
-			Episode:  0,
-			Year:     movie.Year,
-			Language: lang,
-			Quality:  getQuality(movie.Quality.Quality.Resolution),
+	parseCacheMu.Lock()
+	parseCache[title] = parseCacheEntry{
+		result:    result,
+		expiresAt: time.Now().Add(24 * time.Hour),
+	}
+	// Bound capacity to prevent memory leaks (Max 10000 entries)
+	if len(parseCache) > 10000 {
+		for k := range parseCache {
+			delete(parseCache, k)
+			break
 		}
 	}
+	parseCacheMu.Unlock()
 
-	return &ParseResult{
-		Title:    clean,
-		Season:   fallbackSeason,
-		Episode:  0,
-		Language: "en",
-		Quality:  "sd",
-	}
+	return result
 }
 
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
@@ -451,44 +703,6 @@ func isExtraOrSpecialRelaxed(path string) bool {
 		strings.Contains(p, "interview")
 }
 
-func matchRange(path string, targetEpisode int) bool {
-	// Extract base filename to prevent parent folder names from polluting range analysis
-	fileName := path
-	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
-		fileName = path[idx+1:]
-	}
-
-	matches := rangeRegex.FindAllStringSubmatchIndex(fileName, -1)
-	for _, match := range matches {
-		if len(match) >= 6 {
-			startNumStart := match[2]
-			startNumEnd := match[3]
-			endNumStart := match[4]
-			endNumEnd := match[5]
-
-			// Skip matches that are part of decimal numbers (e.g. 13.00-14.00)
-			if startNumStart > 0 && isDecimalDot(fileName, startNumStart-1) {
-				continue
-			}
-			if endNumEnd < len(fileName) && isDecimalDot(fileName, endNumEnd) {
-				continue
-			}
-
-			startStr := fileName[startNumStart:startNumEnd]
-			endStr := fileName[endNumStart:endNumEnd]
-
-			start, err1 := strconv.Atoi(startStr)
-			end, err2 := strconv.Atoi(endStr)
-			if err1 == nil && err2 == nil {
-				if start <= end && targetEpisode >= start && targetEpisode <= end {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
 func isDecimalDot(s string, i int) bool {
 	if i <= 0 || i >= len(s)-1 {
 		return false
@@ -534,7 +748,7 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 		}
 
 		// Check Range Regex (e.g. S01E21-22)
-		if !matched && info.Season == targetSeason && matchRange(c.Path, targetEpisode) {
+		if !matched && info.Season == targetSeason && MatchRange(c.Path, targetEpisode) {
 			matched = true
 		}
 
@@ -591,7 +805,7 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 			candParsed := ParseFilePath(candidate.Path, fallbackSeason)
 			if candParsed.Episode != 0 && candParsed.Episode != targetEpisode {
 				// Avoid aborting on valid conjoined multi-episode ranges containing this episode
-				if !matchRange(candidate.Path, targetEpisode) {
+				if !MatchRange(candidate.Path, targetEpisode) {
 					return CandidateFile{}, false
 				}
 			}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +54,9 @@ var searchCache = utils.NewTTLCache(5 * time.Minute)
 // Compile-time optimized replacement string structure
 var queryReplacer = strings.NewReplacer("\\", "", "\"", "")
 
+// Pre-compiled global regular expression to prevent GC pressure and lookahead errors during live stream serving
+var rangeRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)?\s*(\d+)\s*(?:-|to)\s*(?:e|ep|episode)?\s*(\d+)\b`)
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -90,23 +94,25 @@ func manifestHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func buildOptimizedQuery(name string, altTitles []string, suffix string) string {
+	// Clean colons, hyphens, and brackets from the query string to prevent FTS parser confusion (e.g. "From Dusk Till Dawn: The Series" -> "From Dusk Till Dawn The Series")
 	nameClean := queryReplacer.Replace(name)
+	nameClean = strings.ReplaceAll(nameClean, ":", " ")
+	nameClean = strings.ReplaceAll(nameClean, "-", " ")
+	nameClean = strings.ReplaceAll(nameClean, "(", " ")
+	nameClean = strings.ReplaceAll(nameClean, ")", " ")
+	nameClean = strings.Join(strings.Fields(nameClean), " ")
 
-	var terms []string
-	terms = append(terms, fmt.Sprintf(`"%s"`, nameClean))
-
-	for _, alt := range altTitles {
-		altClean := queryReplacer.Replace(alt)
-		if altClean != "" && altClean != nameClean {
-			terms = append(terms, fmt.Sprintf(`"%s"`, altClean))
-		}
-	}
+	// Detect if the show name is a single word or short stop-word
+	isShortOrStopWord := len(strings.Fields(nameClean)) == 1
 
 	var query string
-	if len(terms) > 1 {
-		query = fmt.Sprintf("(%s)", strings.Join(terms, " | "))
+	if isShortOrStopWord {
+		// Do not wrap in double quotes, and do not append FTS negation operators.
+		// This forces Bitmagnet to fall back natively to its plain-text "search_string" matching,
+		// preventing the stop-word "From" from being completely erased.
+		query = nameClean
 	} else {
-		query = terms[0]
+		query = fmt.Sprintf(`"%s"`, nameClean)
 	}
 
 	if suffix != "" {
@@ -114,8 +120,8 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 		query = fmt.Sprintf("%s %s", query, suffixClean)
 	}
 
-	// Append FTS Negation Keywords dynamically on-demand
-	if len(config.NegateKeywords) > 0 {
+	// Append FTS Negation Keywords only for standard, non-stop-word titles
+	if !isShortOrStopWord && len(config.NegateKeywords) > 0 {
 		var negations []string
 		for _, k := range config.NegateKeywords {
 			negations = append(negations, fmt.Sprintf("!%s", queryReplacer.Replace(k)))
@@ -271,15 +277,27 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		var refinedTorrents, broadTorrents []bitmagnet.TorrentItem
 		g, gCtx := errgroup.WithContext(ctx)
 
+		// Refined Query: Combines target show title, episode block, and premiere year (e.g. From S02E09 2022)
+		// This forces PostgreSQL FTS to filter strictly by your show's launch year, preventing stop-word failures.
 		g.Go(func() error {
-			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, sPadded)
+			suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
+			if meta.Year != "" {
+				suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
+			}
+			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
 			var innerErr error
 			refinedTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, refinedQuery, "tv_show", 50)
 			return innerErr
 		})
 
+		// Broad Query: Combines target show title, season block, and premiere year (e.g. From S02 2022)
+		// Guarantees that complete season packs are returned even if the FTS strips the show's name.
 		g.Go(func() error {
-			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, "")
+			suffix := sPadded
+			if meta.Year != "" {
+				suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
+			}
+			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
 			var innerErr error
 			broadTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, broadQuery, "tv_show", 100)
 			return innerErr
@@ -445,7 +463,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			// Formulate Stream Name (the button text)
 			streamName := fmt.Sprintf("[%s %s] %s | %s | %s", prefix, providerLabel, langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
 
-			// Formulate Stream Title (the description block) with Option B de-cluttered layout
+			// Formulate Stream Title (the description block) with Option B de-cluttered layout + Sanitized Filename
 			var titleBuilder strings.Builder
 			if typ == "series" {
 				packOrRange := checkPackOrRange(s.TorrentName, episode)
@@ -457,6 +475,11 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					titleBuilder.WriteString(fmt.Sprintf("🎬 %s\n", meta.Name))
 				}
 			}
+
+			// Clean actual filename with website prefixes and subdomains dynamically stripped
+			cleanedFileName := parser.SanitizeName(s.TorrentName)
+			titleBuilder.WriteString(fmt.Sprintf("📦 %s\n", cleanedFileName))
+
 			if matchedBadges != "" {
 				titleBuilder.WriteString(fmt.Sprintf("✨ %s\n", matchedBadges))
 			}
@@ -482,7 +505,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			// Formulate Stream Name (the button text)
 			streamName := fmt.Sprintf("[🧲 P2P] %s | %s | %s", langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
 
-			// Formulate Stream Title (the description block) with Option B de-cluttered layout
+			// Formulate Stream Title (the description block) with Option B de-cluttered layout + Sanitized Filename
 			var titleBuilder strings.Builder
 			if typ == "series" {
 				packOrRange := checkPackOrRange(s.TorrentName, episode)
@@ -494,6 +517,11 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					titleBuilder.WriteString(fmt.Sprintf("🎬 %s\n", meta.Name))
 				}
 			}
+
+			// Clean actual filename with website prefixes and subdomains dynamically stripped
+			cleanedFileName := parser.SanitizeName(s.TorrentName)
+			titleBuilder.WriteString(fmt.Sprintf("📦 %s\n", cleanedFileName))
+
 			if matchedBadges != "" {
 				titleBuilder.WriteString(fmt.Sprintf("✨ %s\n", matchedBadges))
 			}

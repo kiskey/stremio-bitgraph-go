@@ -120,15 +120,14 @@ func SearchTorrents(ctx context.Context, searchString, contentType string, limit
 	// Diagnostic logger for verifying compiled exact-phrase, FTS OR-unions, and negation query execution
 	utils.Logger.Debug("executing bitmagnet search query", "query", searchString, "content_type", contentType, "limit", limit)
 
-	// We omit "orderBy" entirely from the query variables. 
-	// When "queryString" is provided, Bitmagnet natively defaults to sorting by "relevance" descending.
-	// Omitting it entirely avoids the complex GORM subquery pagination bug that generates the invalid "_order_1" column reference.
+	// We omit the "contentType" facet filter entirely. 
+	// This forces Bitmagnet to search globally (matching its WebUI behavior), returning unclassified,
+	// movie, and TV show torrents alike. Our Go matcher then cleanly filters them in memory.
 	variables := map[string]interface{}{
 		"input": map[string]interface{}{
 			"queryString": searchString,
 			"limit":       limit,
 			"facets": map[string]interface{}{
-				"contentType": map[string]interface{}{"filter": []string{contentType}},
 				"torrentFileType": map[string]interface{}{
 					"filter": []string{"video"}, // Enforce server-side video filtering only
 				},

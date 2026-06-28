@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"runtime"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/user/stremio-bitgraph-go/internal/bitmagnet"
 	"github.com/user/stremio-bitgraph-go/internal/config"
+	"github.com/user/stremio-bitgraph-go/internal/db"
 	"github.com/user/stremio-bitgraph-go/internal/parser"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
 	"golang.org/x/sync/errgroup"
@@ -38,7 +40,7 @@ var stopWords = map[string]bool{
 	"la": true, "le": true, "les": true, "el": true, "un": true, "une": true,
 }
 
-// metadataWords are technical tags that should not trigger the single-word guardrail.
+// Technical tags that should not trigger the single-word guardrail.
 // These are common torrent metadata tokens that appear after the actual movie title.
 var metadataWords = map[string]bool{
 	"1080p": true, "720p": true, "2160p": true, "480p": true, "360p": true,
@@ -55,7 +57,7 @@ var metadataWords = map[string]bool{
 	"dual": true, "audio": true, "dubbed": true, "dub": true, "multi": true,
 	"hindi": true, "tamil": true, "telugu": true, "malayalam": true,
 	"kannada": true, "bengali": true, "marathi": true, "punjabi": true,
-	"english": true, "spanish": true, "french": true, "italian": true,
+	"english": true, "spanish": true, "french": true, "italic": true,
 	"russian": true, "korean": true, "japanese": true, "chinese": true,
 	"51": true, "71": true, "20": true, "10bit": true, "remux": true,
 	"3d": true, "sdr": true, "gb": true, "mb": true, "kb": true,
@@ -63,6 +65,23 @@ var metadataWords = map[string]bool{
 	"complete": true, "repack": true, "proper": true, "vostfr": true,
 	"subs":     true, "sub": true, "esub": true, "vof": true, "vff": true,
 	"vf":       true, "season": true, "series": true, "episode": true, "pack": true,
+	// Aligned common extensions and formats
+	"mkv": true, "mp4": true, "avi": true, "mov": true, "wmv": true, "flv": true, "webm": true,
+	"rar": true, "zip": true, "par2": true, "nfo": true, "srt": true,
+	// Country/region identifiers & miscellaneous common tags to prevent false negatives
+	"us": true, "uk": true, "ca": true, "nz": true, "au": true,
+	"fr": true, "de": true, "jp": true, "kr": true, "cn": true,
+	"hk": true, "tw": true, "it": true, "es": true, "nl": true,
+	"pl": true, "ru": true, "se": true, "no": true, "fi": true,
+	"dk": true, "new": true, "full": true, "all": true,
+	// Regional language/subtitle abbreviations & subdomain noise markers
+	"tam": true, "tel": true, "hin": true, "eng": true, "mal": true, "kan": true,
+	"msub": true, "tamilmv": true, "tamilblasters": true, "bolly4u": true, "torrent911": true,
+	// Extended regional country, dub, sub, and video format codes
+	"cz": true, "sk": true, "hu": true, "ro": true, "bg": true, "ua": true, "tr": true,
+	"th": true, "vi": true, "he": true, "fa": true, "soft": true, "hard": true,
+	"ntsc": true, "pal": true, "open": true, "matte": true, "unrated": true, "rated": true,
+	"subbed": true, "rosubbed": true, "nlsubs": true, "engsub": true,
 }
 
 // sequelIndicators are words that strongly suggest a different franchise entry.
@@ -125,6 +144,71 @@ var ignoredNumbers = map[string]bool{
 
 var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to)\s*0*(\d+)\b`)
 
+// In-memory undesirable releases keywords to prevent FTS negation bypass on stop-word searches
+var undesirableKeywords = []string{"3d", "cam", "screener", "hdcam", "hdts", "predvd", "dvdscr"}
+
+// Self-Learning Entropy Engine Global State Variables
+var (
+	entropyOnce      sync.Once
+	tokenFrequencies = make(map[string]int)
+	tokenFreqMu      sync.RWMutex
+)
+
+// InitializeEntropyEngine pre-seeds and scans the database to build self-learning token counts
+func InitializeEntropyEngine(ctx context.Context) {
+	// 1. Pre-seed with all metadataWords and stopWords to guarantee 100% cold-start safety
+	tokenFreqMu.Lock()
+	for k := range metadataWords {
+		tokenFrequencies[k] = 1000
+	}
+	for k := range stopWords {
+		tokenFrequencies[k] = 1000
+	}
+	tokenFreqMu.Unlock()
+
+	// 2. Query SQLite torrents table to digest cached filenames with zero circular dependency imports
+	rows, err := db.Pool.QueryContext(ctx, "SELECT torrent_info_json FROM torrents WHERE torrent_info_json IS NOT NULL")
+	if err != nil {
+		utils.Logger.Warn("Entropy Engine: Failed to query torrents table for learning", "error", err)
+		return
+	}
+	defer rows.Close()
+
+	tokenFreqMu.Lock()
+	defer tokenFreqMu.Unlock()
+
+	type minimalTorrentInfo struct {
+		Filename string `json:"filename"`
+	}
+
+	count := 0
+	for rows.Next() {
+		var jsonBytes []byte
+		if err := rows.Scan(&jsonBytes); err != nil {
+			continue
+		}
+		var info minimalTorrentInfo
+		if err := json.Unmarshal(jsonBytes, &info); err == nil && info.Filename != "" {
+			cleanName := parser.SanitizeName(info.Filename)
+			for _, w := range strings.Fields(strings.ToLower(cleanName)) {
+				tokenFrequencies[cleanWord(w)]++
+			}
+			count++
+		}
+	}
+	utils.Logger.Info("Entropy Engine: Successfully digested historical cache", "records", count, "unique_tokens", len(tokenFrequencies))
+}
+
+// UpdateEntropyToken registers a newly processed filename dynamically to keep the engine updated
+func UpdateEntropyToken(name string) {
+	tokenFreqMu.Lock()
+	defer tokenFreqMu.Unlock()
+	cleanName := parser.SanitizeName(name)
+	for _, w := range strings.Fields(strings.ToLower(cleanName)) {
+		tokenFrequencies[cleanWord(w)]++
+	}
+}
+
 // isBlockedArchive checks if a torrent name is a compressed archive that Stremio cannot play
 func isBlockedArchive(name string) bool {
 	lower := strings.ToLower(name)
@@ -134,6 +218,27 @@ func isBlockedArchive(name string) bool {
 		strings.HasSuffix(lower, ".tar") ||
 		strings.HasSuffix(lower, ".tgz") ||
 		strings.HasSuffix(lower, ".gz")
+}
+
+// isUndesirableRelease performs a standard lookahead-free boundaries check inside Go memory space
+func isUndesirableRelease(name string) bool {
+	lower := strings.ToLower(name)
+	for _, k := range undesirableKeywords {
+		idx := strings.Index(lower, k)
+		if idx != -1 {
+			// Validate POSIX boundaries natively to prevent false positive matches
+			startBound := idx == 0 || !isAlphaNum(lower[idx-1])
+			endBound := idx+len(k) == len(lower) || !isAlphaNum(lower[idx+len(k)])
+			if startBound && endBound {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isAlphaNum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 }
 
 func containsNonASCII(s string) bool {
@@ -156,62 +261,90 @@ func stripLeadingArticles(s string) string {
 	return s
 }
 
+// cleanWord converts a string to lowercase and removes non-alphanumeric characters.
+// Features an allocation-free fast-path for already cleaned string inputs.
 func cleanWord(w string) string {
-	return strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			return r
+	hasUpperOrNonAlpha := false
+	for i := 0; i < len(w); i++ {
+		c := w[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+			hasUpperOrNonAlpha = true
+			break
 		}
-		return -1
-	}, strings.ToLower(w))
+	}
+	if !hasUpperOrNonAlpha {
+		return w
+	}
+
+	var buf []byte
+	for i := 0; i < len(w); i++ {
+		c := w[i]
+		if c >= 'A' && c <= 'Z' {
+			buf = append(buf, c+32)
+		} else if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			buf = append(buf, c)
+		}
+	}
+	return string(buf)
+}
+
+// isYearNumber checks if a string is a standard 4-digit release year
+func isYearNumber(s string) bool {
+	return len(s) == 4 && (strings.HasPrefix(s, "19") || strings.HasPrefix(s, "20"))
+}
+
+// isNumber checks if a string consists entirely of digits
+func isNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isTechnicalToken performs an allocation-free dynamic check to identify season, episode,
 // and pack-specific serialization tokens, allowing them to safely bypass the guardrail.
 func isTechnicalToken(s string) bool {
-	// 1. Direct O(1) Map Lookups
 	if metadataWords[s] || stopWords[s] {
 		return true
 	}
 
-	// 2. Standalone Number Check (e.g. "1", "01")
 	if isNumber(s) {
 		return true
 	}
 
-	// 3. Dynamic Prefix + Number Parsing (Allocation-Free Slicing)
 	if len(s) >= 2 {
-		// "s1", "e1", "p1"
 		first := s[0]
 		if (first == 's' || first == 'e' || first == 'p') && isNumber(s[1:]) {
 			return true
 		}
-		// "se1", "ep1"
 		if len(s) >= 3 {
 			prefix2 := s[:2]
 			if (prefix2 == "se" || prefix2 == "ep") && isNumber(s[2:]) {
 				return true
 			}
 		}
-		// "epi1"
 		if len(s) >= 4 {
 			if s[:3] == "epi" && isNumber(s[3:]) {
 				return true
 			}
 		}
-		// "seas1", "part1"
 		if len(s) >= 5 {
 			prefix4 := s[:4]
 			if (prefix4 == "seas" || prefix4 == "part") && isNumber(s[4:]) {
 				return true
 			}
 		}
-		// "season1", "series1"
 		if len(s) >= 7 {
 			if s[:6] == "season" && isNumber(s[6:]) {
 				return true
 			}
 		}
-		// "episode1"
 		if len(s) >= 8 {
 			if s[:7] == "episode" && isNumber(s[7:]) {
 				return true
@@ -224,9 +357,14 @@ func isTechnicalToken(s string) bool {
 // passTitleGuardrail prevents single-word titles (e.g. "Up", "It") from matching
 // unrelated multi-word torrents (e.g. "Upgraded", "Italian"). It allows metadata
 // words (codecs, quality tags, languages) to pass through.
-func passTitleGuardrail(targetTitle, parsedTitle string) bool {
+func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) bool {
 	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
 	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
+
+	// Temporarily replace hyphens with standard spaces to handle dash-joined titles
+	// like "From-Scratch" matching "From Scratch" cleanly.
+	cleanTarget = strings.ReplaceAll(cleanTarget, "-", " ")
+	cleanParsed = strings.ReplaceAll(cleanParsed, "-", " ")
 
 	if cleanTarget == cleanParsed {
 		return true
@@ -241,9 +379,57 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 	targetWords := strings.Fields(targetNoArt)
 	parsedWords := strings.Fields(parsedNoArt)
 
+	// ── UPGRADE: Substantive Word Guardrail ──
+	// Ensure the parsed title doesn't contain unrelated substantive words.
+	// This prevents partial title matches, release group leaks, and unrelated shows.
+	targetWordSet := make(map[string]bool)
+	for _, w := range targetWords {
+		targetWordSet[cleanWord(w)] = true
+	}
+	for _, alt := range altTitles {
+		cleanAlt := strings.Trim(strings.ToLower(alt), " .-_[]()/\\")
+		cleanAlt = strings.ReplaceAll(cleanAlt, "-", " ")
+		altNoArt := stripLeadingArticles(cleanAlt)
+		for _, w := range strings.Fields(altNoArt) {
+			targetWordSet[cleanWord(w)] = true
+		}
+	}
+
+	hasUnrelatedSubstantiveWord := false
+	for _, w := range parsedWords {
+		cw := cleanWord(w)
+		if cw == "" {
+			continue
+		}
+		if targetWordSet[cw] {
+			continue
+		}
+
+		// Self-Learning Entropy Guardrail:
+		// Check the dynamic frequency of the word in our database.
+		// If the word appears across 3 or more records, it is classified as low-entropy noise (metadata).
+		// If it has a frequency of 1 or 2, it is treated as a highly unique substantive word (another show/movie title).
+		tokenFreqMu.RLock()
+		freq := tokenFrequencies[cw]
+		tokenFreqMu.RUnlock()
+
+		if freq >= 3 {
+			continue // Low-entropy noise word (Safely Skipped)
+		}
+
+		if isTechnicalToken(cw) {
+			continue
+		}
+		hasUnrelatedSubstantiveWord = true
+		break
+	}
+
+	if hasUnrelatedSubstantiveWord {
+		return false // ❌ REJECTED (Unrelated Substantive Word Detected)
+	}
+
 	// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail ──
 	if len(targetWords) > 1 && len(parsedWords) > len(targetWords) {
-		// Verify if the parsed title starts with the target phrase
 		startsSame := true
 		for i := 0; i < len(targetWords); i++ {
 			if cleanWord(parsedWords[i]) != cleanWord(targetWords[i]) {
@@ -253,7 +439,6 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 		}
 
 		if startsSame {
-			// Extract the extra trailing tokens (P \ T)
 			extraWords := parsedWords[len(targetWords):]
 			hasSubstantiveProperNoun := false
 			for _, w := range extraWords {
@@ -261,8 +446,6 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 				if cw == "" {
 					continue
 				}
-				// If the extra word is NOT a stop word and NOT a technical metadata word/pattern,
-				// we flag it as an unauthorizedProperNoun (indicating a different show entity).
 				if !isTechnicalToken(cw) {
 					hasSubstantiveProperNoun = true
 					break
@@ -274,26 +457,32 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 		}
 	}
 
-	// ── Standard Single-Word Title Guardrail (Preserved & Fine-Tuned) ──
+	// ── Standard Single-Word Title Guardrail (Corrected & Safe) ──
 	if len(targetWords) == 1 {
 		singleWord := cleanWord(targetWords[0])
 		if len(parsedWords) > 1 {
-			firstWord := cleanWord(parsedWords[0])
-			if firstWord == singleWord {
-				return true
-			}
-
 			hasExtraNonMeta := false
 			for _, w := range parsedWords {
 				cw := cleanWord(w)
-				if cw != "" && cw != singleWord && !isTechnicalToken(cw) {
-					hasExtraNonMeta = true
-					break
+				if cw != "" && cw != singleWord {
+					tokenFreqMu.RLock()
+					freq := tokenFrequencies[cw]
+					tokenFreqMu.RUnlock()
+
+					if freq >= 3 {
+						continue // Low-entropy noise word (Safely Skipped)
+					}
+
+					if !isTechnicalToken(cw) {
+						hasExtraNonMeta = true
+						break
+					}
 				}
 			}
 			if hasExtraNonMeta {
 				return false // ❌ REJECTED
 			}
+			return true
 		}
 	}
 	return true
@@ -306,8 +495,22 @@ func getHomoglyphRepresentations(r rune) []rune {
 	return []rune{r}
 }
 
+// Global recycled pool for fast map reuse (Zero allocations on map creation)
+var uint64MapPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[uint64]struct{}, 64)
+	},
+}
+
+func clearMap(m map[uint64]struct{}) {
+	for k := range m {
+		delete(m, k)
+	}
+}
+
 // OverlapCoefficient computes the overlap coefficient between two strings
 // using multi-representation homoglyph character bigrams.
+// Fully optimized for zero heap allocations, bitwise rune-packing, and zero GC pressure.
 func OverlapCoefficient(s1, s2 string) float64 {
 	if s1 == s2 {
 		return 1.0
@@ -317,35 +520,56 @@ func OverlapCoefficient(s1, s2 string) float64 {
 		return 0.0
 	}
 
-	bg1 := make(map[string]struct{}, len(s1)*2)
-	runes1 := []rune(s1)
-	for i := 0; i < len(runes1)-1; i++ {
-		repsA := getHomoglyphRepresentations(runes1[i])
-		repsB := getHomoglyphRepresentations(runes1[i+1])
+	bg1 := uint64MapPool.Get().(map[uint64]struct{})
+	bg2 := uint64MapPool.Get().(map[uint64]struct{})
+	defer func() {
+		clearMap(bg1)
+		uint64MapPool.Put(bg1)
+		clearMap(bg2)
+		uint64MapPool.Put(bg2)
+	}()
+
+	var lastRune rune
+	hasLast := false
+	for _, r := range s1 {
+		if !hasLast {
+			lastRune = r
+			hasLast = true
+			continue
+		}
+		repsA := getHomoglyphRepresentations(lastRune)
+		repsB := getHomoglyphRepresentations(r)
 		for _, charA := range repsA {
 			for _, charB := range repsB {
-				bg1[string(charA)+string(charB)] = struct{}{}
+				packed := (uint64(charA) << 32) | uint64(charB)
+				bg1[packed] = struct{}{}
 			}
 		}
+		lastRune = r
 	}
 
-	bg2 := make(map[string]struct{}, len(s2)*2)
-	runes2 := []rune(s2)
 	intersection := 0
-	for i := 0; i < len(runes2)-1; i++ {
-		repsA := getHomoglyphRepresentations(runes2[i])
-		repsB := getHomoglyphRepresentations(runes2[i+1])
+	hasLast = false
+	for _, r := range s2 {
+		if !hasLast {
+			lastRune = r
+			hasLast = true
+			continue
+		}
+		repsA := getHomoglyphRepresentations(lastRune)
+		repsB := getHomoglyphRepresentations(r)
 		for _, charA := range repsA {
 			for _, charB := range repsB {
-				bigram := string(charA) + string(charB)
-				if _, ok := bg2[bigram]; !ok {
-					bg2[bigram] = struct{}{}
-					if _, exists := bg1[bigram]; exists {
+				packed := (uint64(charA) << 32) | uint64(charB)
+				if _, ok := bg2[packed]; !ok {
+					bg2[packed] = struct{}{}
+					if _, exists := bg1[packed]; exists {
 						intersection++
 					}
 				}
 			}
 		}
+		lastRune = r
 	}
 
 	if len(bg1) == 0 || len(bg2) == 0 {
@@ -366,18 +590,6 @@ func isRomanSequence(s string) bool {
 	}
 	for _, r := range s {
 		if r != 'i' && r != 'v' && r != 'x' && r != 'l' && r != 'c' && r != 'd' && r != 'm' {
-			return false
-		}
-	}
-	return true
-}
-
-func isNumber(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
 			return false
 		}
 	}
@@ -449,7 +661,7 @@ func extractNonYearNumbers(s string) []string {
 		} else {
 			if current.Len() > 0 {
 				val := current.String()
-				if !ignoredNumbers[val] && !(len(val) == 4 && (strings.HasPrefix(val, "19") || strings.HasPrefix(val, "20"))) {
+				if !ignoredNumbers[val] && !isYearNumber(val) {
 					nums = append(nums, val)
 				}
 				current.Reset()
@@ -458,7 +670,7 @@ func extractNonYearNumbers(s string) []string {
 	}
 	if current.Len() > 0 {
 		val := current.String()
-		if !ignoredNumbers[val] && !(len(val) == 4 && (strings.HasPrefix(val, "19") || strings.HasPrefix(val, "20"))) {
+		if !ignoredNumbers[val] && !isYearNumber(val) {
 			nums = append(nums, val)
 		}
 	}
@@ -536,7 +748,8 @@ func sequelGuardrail(targetTitle, parsedTitle string, score float64) float64 {
 	extraWords := strings.Fields(extra)
 	for _, w := range extraWords {
 		cw := cleanWord(w)
-		if isRomanSequence(cw) || isNumber(cw) || sequelIndicators[cw] {
+		// Upgrade: Prevent legitimate release years from destroying movie similarity scores
+		if isRomanSequence(cw) || (isNumber(cw) && !isYearNumber(cw)) || sequelIndicators[cw] {
 			return score * (float64(shorter) / float64(longer))
 		}
 	}
@@ -576,11 +789,45 @@ func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 
 	oc = sequelGuardrail(tmdbTitle, parsed.Title, oc)
 
-	if oc >= config.SimilarityThreshold {
-		return oc
-	}
-
 	return oc
+}
+
+// stripDiacritics maps standard Latin-1 and advanced unicode diacritics to ASCII base characters
+func stripDiacritics(s string) string {
+	var replacer = strings.NewReplacer(
+		"ā", "a", "á", "a", "à", "a", "ä", "a", "â", "a", "ã", "a", "å", "a",
+		"ē", "e", "é", "e", "è", "e", "ë", "e", "ê", "e",
+		"ī", "i", "í", "i", "ì", "i", "ï", "i", "î", "i",
+		"ō", "o", "ó", "o", "ò", "o", "ö", "o", "ô", "o", "õ", "o", "ø", "o",
+		"ū", "u", "ú", "u", "ù", "u", "ü", "u", "û", "u",
+		"ý", "y", "ÿ", "y",
+		"ñ", "n", "ç", "c",
+		"Ā", "A", "Á", "A", "À", "A", "Ä", "A", "Â", "A", "Ã", "A", "Å", "A",
+		"Ē", "E", "É", "E", "È", "E", "Ë", "E", "Ê", "E",
+		"Ī", "I", "Í", "I", "Ì", "I", "Ï", "I", "Î", "I",
+		"Ō", "O", "Ó", "O", "Ò", "O", "Ö", "O", "Ô", "O", "Õ", "O", "Ø", "O",
+		"Ū", "U", "Ú", "U", "Ù", "U", "Ü", "U", "Û", "U",
+		"Ý", "Y", "Ñ", "N", "Ç", "C",
+	)
+	return replacer.Replace(s)
+}
+
+// injectNormalizedAltTitle adds the un-accented ASCII representation to AltTitles if it differs from the primary name
+func injectNormalizedAltTitle(name string, alts []string) []string {
+	normalized := stripDiacritics(name)
+	if normalized != name {
+		isUnique := true
+		for _, existing := range alts {
+			if existing == normalized {
+				isUnique = false
+				break
+			}
+		}
+		if isUnique {
+			alts = append(alts, normalized)
+		}
+	}
+	return alts
 }
 
 func getBestLanguage(torrentLanguages []struct{ ID string }, preferredLanguages []string) string {
@@ -658,6 +905,13 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 }
 
 func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, altTitles []string, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+	// Dynamically load the self-learning Entropy Engine exactly once on the first query execution.
+	// This eliminates startup circular dependency import cycles and cold-start latencies.
+	entropyOnce.Do(func() {
+		utils.Logger.Info("Entropy Engine: Initiating self-learning parser scan...")
+		InitializeEntropyEngine(context.Background())
+	})
+
 	for _, torrent := range cachedRows {
 		if findFileInTorrentInfo(torrent, season, episode) {
 			infoHash, _ := torrent["infohash"].(string)
@@ -722,8 +976,8 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 		if torrentData.Name == "" {
 			continue
 		}
-		if isBlockedArchive(torrentData.Name) {
-			utils.Logger.Warn("filtering out series torrent: matches compressed archive pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
+		if isBlockedArchive(torrentData.Name) || isUndesirableRelease(torrentData.Name) {
+			utils.Logger.Warn("filtering out series torrent: matches compressed archive or undesirable pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
 			continue
 		}
 
@@ -778,7 +1032,7 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 			}
 
 			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Series) ──
-			if !passTitleGuardrail(matchingTitle, parsed.Title) {
+			if !passTitleGuardrail(matchingTitle, parsed.Title, altTitles) {
 				utils.Logger.Debug("filtering out series torrent: failed title guardrail", "target", matchingTitle, "parsed", parsed.Title)
 				return nil
 			}
@@ -797,7 +1051,15 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 
 			if parsed.Season == season || isMultiSeasonPack {
 				if td.FilesStatus == "single" {
-					if parsed.Episode != 0 && parsed.Episode != episode {
+					matched := false
+					if parsed.Episode == episode {
+						matched = true
+					}
+					// Dynamic single-file range validation (Sonarr/Radarr compatible fallback)
+					if !matched && parser.MatchRange(td.Name, episode) {
+						matched = true
+					}
+					if !matched {
 						return nil
 					}
 
@@ -842,6 +1104,8 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 			}
 
 			if len(local) > 0 {
+				// Register matched filename dynamically to update Entropy Engine weights
+				UpdateEntropyToken(td.Name)
 				results <- jobResult{streams: local}
 			}
 			return nil
@@ -860,6 +1124,12 @@ func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem,
 }
 
 func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, altTitles []string, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+	// Dynamically load the self-learning Entropy Engine exactly once on the first query execution.
+	entropyOnce.Do(func() {
+		utils.Logger.Info("Entropy Engine: Initiating self-learning parser scan...")
+		InitializeEntropyEngine(context.Background())
+	})
+
 	for _, torrent := range cachedRows {
 		infoHash, _ := torrent["infohash"].(string)
 		lang, _ := torrent["language"].(string)
@@ -922,8 +1192,8 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 		if torrentData.Name == "" {
 			continue
 		}
-		if isBlockedArchive(torrentData.Name) {
-			utils.Logger.Warn("filtering out movie torrent: matches compressed archive pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
+		if isBlockedArchive(torrentData.Name) || isUndesirableRelease(torrentData.Name) {
+			utils.Logger.Warn("filtering out movie torrent: matches compressed archive or undesirable pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
 			continue
 		}
 
@@ -958,8 +1228,13 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 
 			parsed := parser.RobustParseInfo(td.Name, 0)
 
+			// Type-Leakage Prevention: TV Series episodes/packs must never match as movie streams
+			if parsed.Season != 0 || parsed.Episode != 0 || parsed.IsPack {
+				return nil
+			}
+
 			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Movie) ──
-			if !passTitleGuardrail(matchingTitle, parsed.Title) {
+			if !passTitleGuardrail(matchingTitle, parsed.Title, altTitles) {
 				utils.Logger.Debug("filtering out movie torrent: failed title guardrail", "target", matchingTitle, "parsed", parsed.Title)
 				return nil
 			}
@@ -1010,6 +1285,9 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
 				quality = parsed.Quality
 			}
+
+			// Register matched filename dynamically to update Entropy Engine weights
+			UpdateEntropyToken(td.Name)
 
 			results <- jobResult{streams: []Stream{{
 				InfoHash:    t.InfoHash,
