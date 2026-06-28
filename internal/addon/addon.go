@@ -397,7 +397,8 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				return err
 			})
 		} else {
-			// Regular Series: Follows existing year patterns
+			// Regular Series: Follows existing year patterns with no-year fallback queries
+			// 1. Refined with Year
 			g.Go(func() error {
 				suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
 				if meta.Year != "" {
@@ -413,6 +414,22 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				return err
 			})
 
+			// 2. Refined WITHOUT Year (Ensures newer seasons of decade-spanning shows match)
+			if meta.Year != "" {
+				g.Go(func() error {
+					suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
+					query := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
+					res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+					if err == nil {
+						refinedMu.Lock()
+						refinedTorrents = append(refinedTorrents, res...)
+						refinedMu.Unlock()
+					}
+					return err
+				})
+			}
+
+			// 3. Broad with Year
 			g.Go(func() error {
 				suffix := sPadded
 				if meta.Year != "" {
@@ -427,6 +444,21 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				}
 				return err
 			})
+
+			// 4. Broad WITHOUT Year (Ensures newer season packs match)
+			if meta.Year != "" {
+				g.Go(func() error {
+					suffix := sPadded
+					query := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
+					res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+					if err == nil {
+						broadMu.Lock()
+						broadTorrents = append(broadTorrents, res...)
+						broadMu.Unlock()
+					}
+					return err
+				})
+			}
 		}
 
 		_ = g.Wait()
