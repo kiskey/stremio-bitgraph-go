@@ -120,18 +120,13 @@ func SearchTorrents(ctx context.Context, searchString, contentType string, limit
 	// Diagnostic logger for verifying compiled exact-phrase, FTS OR-unions, and negation query execution
 	utils.Logger.Debug("executing bitmagnet search query", "query", searchString, "content_type", contentType, "limit", limit)
 
-	// We omit the "contentType" facet filter entirely. 
+	// We omit the "contentType" facet filter and "torrentFileType" filters entirely. 
 	// This forces Bitmagnet to search globally (matching its WebUI behavior), returning unclassified,
 	// movie, and TV show torrents alike. Our Go matcher then cleanly filters them in memory.
 	variables := map[string]interface{}{
 		"input": map[string]interface{}{
 			"queryString": searchString,
 			"limit":       limit,
-			"facets": map[string]interface{}{
-				"torrentFileType": map[string]interface{}{
-					"filter": []string{"video"}, // Enforce server-side video filtering only
-				},
-			},
 		},
 	}
 
@@ -164,7 +159,7 @@ func GetTorrentFiles(ctx context.Context, infoHash string) ([]TorrentFile, error
 	type filesData struct {
 		Torrent struct {
 			Files struct {
-				Items []TorrentFile `json:"items"`
+				Items []TorrentFile `json:"files"`
 			} `json:"files"`
 		} `json:"torrent"`
 	}
