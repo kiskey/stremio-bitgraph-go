@@ -951,6 +951,21 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 	return result
 }
 
+func isVideoFile(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".mkv") ||
+		strings.HasSuffix(lower, ".mp4") ||
+		strings.HasSuffix(lower, ".avi") ||
+		strings.HasSuffix(lower, ".mov") ||
+		strings.HasSuffix(lower, ".wmv") ||
+		strings.HasSuffix(lower, ".flv") ||
+		strings.HasSuffix(lower, ".webm") ||
+		strings.HasSuffix(lower, ".m4v") ||
+		strings.HasSuffix(lower, ".ts") ||
+		strings.HasSuffix(lower, ".mpg") ||
+		strings.HasSuffix(lower, ".mpeg")
+}
+
 func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, altTitles []string, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
 	return FindBestSeriesStreamsLongRunning(ctx, tmdbShow, altTitles, season, episode, newTorrents, cachedRows, preferredLanguages, false, "", AnimePriorMeta{})
 }
@@ -1175,11 +1190,47 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 				} else if td.FilesStatus == "multi" {
 					files, ok := filesMap[t.InfoHash]
 					if !ok || len(files) == 0 {
+						// Fallback: If no files info is populated yet, match against the torrent name directly
+						matched := false
+						if parsed.Episode == episode {
+							matched = true
+						}
+						if !matched && parser.MatchRange(td.Name, episode) {
+							matched = true
+						}
+						if !matched && isLongRunning && airDate != "" {
+							parts := strings.Split(airDate, "-")
+							if len(parts) == 3 {
+								dotAirDate := fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
+								dashAirDate := airDate
+								spaceAirDate := fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
+								lowerName := strings.ToLower(td.Name)
+								if strings.Contains(lowerName, dotAirDate) || 
+								   strings.Contains(lowerName, dashAirDate) || 
+								   strings.Contains(lowerName, spaceAirDate) {
+									matched = true
+								}
+							}
+						}
+						if !matched {
+							return nil
+						}
+
+						local = append(local, Stream{
+							InfoHash:    t.InfoHash,
+							FileIndex:   0,
+							TorrentName: td.Name,
+							Seeders:     t.Seeders,
+							Language:    bestLang,
+							Quality:     quality,
+							Size:        td.Size,
+							IsCached:    false,
+						})
 						return nil
 					}
 					var candidates []parser.CandidateFile
 					for _, f := range files {
-						if f.FileType == "video" || parser.MatchRange(f.Path, episode) {
+						if f.FileType == "video" || isVideoFile(f.Path) {
 							candidates = append(candidates, parser.CandidateFile{
 								ID:   f.Index,
 								Path: f.Path,
