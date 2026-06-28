@@ -65,6 +65,8 @@ var metadataWords = map[string]bool{
 	"complete": true, "repack": true, "proper": true, "vostfr": true,
 	"subs":     true, "sub": true, "esub": true, "vof": true, "vff": true,
 	"vf":       true, "season": true, "series": true, "episode": true, "pack": true,
+	// Live Action & Regional Series Metadata Indicators (Added to prevent guardrail false-positives)
+	"live": true, "action": true, "serie": true,
 	// Aligned common extensions and formats
 	"mkv": true, "mp4": true, "avi": true, "mov": true, "wmv": true, "flv": true, "webm": true,
 	"rar": true, "zip": true, "par2": true, "nfo": true, "srt": true,
