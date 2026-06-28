@@ -51,7 +51,7 @@ func init() {
 
 	AddonID = "org.stremio.go.bitmagnet"
 	AddonName = "GoMagnet"
-	AddonVersion = "7.3.1" // Incremented for robust season pack and filesStatus matching
+	AddonVersion = "7.3.2" // Incremented for precise website prefix domain stripper fix
 
 	RealDebridAPIKey = os.Getenv("REALDEBRID_API_KEY")
 	TmdbAPIKey = os.Getenv("TMDB_API_KEY")
