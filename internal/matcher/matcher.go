@@ -154,6 +154,46 @@ var (
 	tokenFreqMu      sync.RWMutex
 )
 
+var abbreviationMap = map[string][]string{
+	"dr":   {"doctor"},
+	"st":   {"saint"},
+	"mr":   {"mister"},
+	"mrs":  {"missus", "missis"},
+	"vs":   {"versus"},
+	"wk":   {"week"},
+	"ft":   {"feat", "featuring"},
+}
+
+func ExpandAbbreviations(title string) string {
+	words := strings.Fields(strings.ToLower(title))
+	for i, w := range words {
+		cleaned := strings.TrimRight(w, ".,;:!?")
+		if expansions, ok := abbreviationMap[cleaned]; ok && len(expansions) > 0 {
+			words[i] = expansions[0]
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+func tokenPositionOverlap(s1, s2 string) float64 {
+	t1 := strings.Fields(strings.ToLower(s1))
+	t2 := strings.Fields(strings.ToLower(s2))
+	if len(t1) == 0 || len(t2) == 0 {
+		return 0
+	}
+	minLen := len(t1)
+	if len(t2) < minLen {
+		minLen = len(t2)
+	}
+	matches := 0
+	for i := 0; i < minLen; i++ {
+		if cleanWord(t1[i]) == cleanWord(t2[i]) {
+			matches++
+		}
+	}
+	return float64(matches) / float64(minLen)
+}
+
 // InitializeEntropyEngine pre-seeds and scans the database to build self-learning token counts
 func InitializeEntropyEngine(ctx context.Context) {
 	// 1. Pre-seed with all metadataWords and stopWords to guarantee 100% cold-start safety
@@ -452,7 +492,7 @@ func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) boo
 				}
 			}
 			if hasSubstantiveProperNoun {
-				return false // ❌ REJECTED (Substantive Proper-Noun Detected)
+				return false
 			}
 		}
 	}
@@ -493,95 +533,6 @@ func getHomoglyphRepresentations(r rune) []rune {
 		return classes
 	}
 	return []rune{r}
-}
-
-// Global recycled pool for fast map reuse (Zero allocations on map creation)
-var uint64MapPool = sync.Pool{
-	New: func() interface{} {
-		return make(map[uint64]struct{}, 64)
-	},
-}
-
-func clearMap(m map[uint64]struct{}) {
-	for k := range m {
-		delete(m, k)
-	}
-}
-
-// OverlapCoefficient computes the overlap coefficient between two strings
-// using multi-representation homoglyph character bigrams.
-// Fully optimized for zero heap allocations, bitwise rune-packing, and zero GC pressure.
-func OverlapCoefficient(s1, s2 string) float64 {
-	if s1 == s2 {
-		return 1.0
-	}
-
-	if len(s1) < 2 || len(s2) < 2 {
-		return 0.0
-	}
-
-	bg1 := uint64MapPool.Get().(map[uint64]struct{})
-	bg2 := uint64MapPool.Get().(map[uint64]struct{})
-	defer func() {
-		clearMap(bg1)
-		uint64MapPool.Put(bg1)
-		clearMap(bg2)
-		uint64MapPool.Put(bg2)
-	}()
-
-	var lastRune rune
-	hasLast := false
-	for _, r := range s1 {
-		if !hasLast {
-			lastRune = r
-			hasLast = true
-			continue
-		}
-		repsA := getHomoglyphRepresentations(lastRune)
-		repsB := getHomoglyphRepresentations(r)
-		for _, charA := range repsA {
-			for _, charB := range repsB {
-				packed := (uint64(charA) << 32) | uint64(charB)
-				bg1[packed] = struct{}{}
-			}
-		}
-		lastRune = r
-	}
-
-	intersection := 0
-	hasLast = false
-	for _, r := range s2 {
-		if !hasLast {
-			lastRune = r
-			hasLast = true
-			continue
-		}
-		repsA := getHomoglyphRepresentations(lastRune)
-		repsB := getHomoglyphRepresentations(r)
-		for _, charA := range repsA {
-			for _, charB := range repsB {
-				packed := (uint64(charA) << 32) | uint64(charB)
-				if _, ok := bg2[packed]; !ok {
-					bg2[packed] = struct{}{}
-					if _, exists := bg1[packed]; exists {
-						intersection++
-					}
-				}
-			}
-		}
-		lastRune = r
-	}
-
-	if len(bg1) == 0 || len(bg2) == 0 {
-		return 0.0
-	}
-
-	minSize := len(bg1)
-	if len(bg2) < minSize {
-		minSize = len(bg2)
-	}
-
-	return float64(intersection) / float64(minSize)
 }
 
 func isRomanSequence(s string) bool {
@@ -769,6 +720,9 @@ func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 	cleanTmdb := strings.Trim(strings.ToLower(tmdbTitle), " .-_[]()/\\")
 	cleanParsed := strings.Trim(strings.ToLower(parsed.Title), " .-_[]()/\\")
 
+	cleanTmdb = ExpandAbbreviations(cleanTmdb)
+	cleanParsed = ExpandAbbreviations(cleanParsed)
+
 	cleanTmdb = normalizeNumbersInTitle(cleanTmdb)
 	cleanParsed = normalizeNumbersInTitle(cleanParsed)
 
@@ -777,11 +731,16 @@ func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 	}
 
 	oc := OverlapCoefficient(cleanTmdb, cleanParsed)
+	posOc := tokenPositionOverlap(cleanTmdb, cleanParsed)
+
+	oc = (oc * 0.7) + (posOc * 0.3)
 
 	cleanTmdbNoArt := stripLeadingArticles(cleanTmdb)
 	cleanParsedNoArt := stripLeadingArticles(cleanParsed)
 	if cleanTmdbNoArt != cleanTmdb || cleanParsedNoArt != cleanParsed {
 		ocClean := OverlapCoefficient(cleanTmdbNoArt, cleanParsedNoArt)
+		posOcClean := tokenPositionOverlap(cleanTmdbNoArt, cleanParsedNoArt)
+		ocClean = (ocClean * 0.7) + (posOcClean * 0.3)
 		if ocClean > oc {
 			oc = ocClean
 		}
@@ -905,10 +864,12 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 }
 
 func FindBestSeriesStreams(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, altTitles []string, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
-	return FindBestSeriesStreamsLongRunning(ctx, tmdbShow, altTitles, season, episode, newTorrents, cachedRows, preferredLanguages, false, "")
+	return FindBestSeriesStreamsLongRunning(ctx, tmdbShow, altTitles, season, episode, newTorrents, cachedRows, preferredLanguages, false, "", AnimePriorMeta{})
 }
 
-func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, altTitles []string, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string, isLongRunning bool, airDate string) (streams []Stream, cachedStreams []Stream) {
+func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.TorrentItem, altTitles []string, season, episode int, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string, isLongRunning bool, airDate string, prior AnimePriorMeta) (streams []Stream, cachedStreams []Stream) {
+	// Dynamically load the self-learning Entropy Engine exactly once on the first query execution.
+	// This eliminates startup circular dependency import cycles and cold-start latencies.
 	entropyOnce.Do(func() {
 		utils.Logger.Info("Entropy Engine: Initiating self-learning parser scan...")
 		InitializeEntropyEngine(context.Background())
@@ -993,6 +954,22 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 			default:
 			}
 
+			// Apply Bayesian LLR Anime Gated Shield
+			if !EvaluateAnimeShield(td.Name, prior) {
+				return nil
+			}
+
+			// Apply Temporal Disqualification Shield
+			if t.PublishedAt != "" && tmdbShow.PublishedAt != "" {
+				premiereY, err := strconv.Atoi(tmdbShow.PublishedAt)
+				if err == nil {
+					pubTs := parsePublishedAt(t.PublishedAt)
+					if isNewerShowDisqualified(pubTs, premiereY) {
+						return nil
+					}
+				}
+			}
+
 			// Find the title (primary or alternate) that actually matched
 			matchingTitle := ""
 			bestSim := getTitleSimilarity(tmdbShow.Title, td.Name)
@@ -1012,7 +989,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 				return nil
 			}
 
-			// SPEBC: Block older remakes by checking if the torrent year is older than the premiere year (Skipped for Daily/LongRunning shows)
+			// SPEBC: Block older remakes by checking if the torrent year is older than the premiere year
 			parsed := parser.RobustParseInfo(td.Name, 0)
 			if !isLongRunning && parsed.Year != 0 && tmdbShow.PublishedAt != "" {
 				premiereY, err := strconv.Atoi(tmdbShow.PublishedAt)
@@ -1114,7 +1091,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 					}
 					var candidates []parser.CandidateFile
 					for _, f := range files {
-						if f.FileType == "video" {
+						if f.FileType == "video" || parser.MatchRange(f.Path, episode) {
 							candidates = append(candidates, parser.CandidateFile{
 								ID:   f.Index,
 								Path: f.Path,
@@ -1138,6 +1115,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 			}
 
 			if len(local) > 0 {
+				// Register matched filename dynamically to update Entropy Engine weights
 				UpdateEntropyToken(td.Name)
 				results <- jobResult{streams: local}
 			}
@@ -1156,7 +1134,8 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 	return streams, cachedStreams
 }
 
-func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, altTitles []string, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string) (streams []Stream, cachedStreams []Stream) {
+func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, altTitles []string, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string, prior AnimePriorMeta) (streams []Stream, cachedStreams []Stream) {
+	// Dynamically load the self-learning Entropy Engine exactly once on the first query execution.
 	entropyOnce.Do(func() {
 		utils.Logger.Info("Entropy Engine: Initiating self-learning parser scan...")
 		InitializeEntropyEngine(context.Background())
@@ -1237,6 +1216,22 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			case <-gCtx.Done():
 				return gCtx.Err()
 			default:
+			}
+
+			// Apply Bayesian LLR Anime Gated Shield
+			if !EvaluateAnimeShield(td.Name, prior) {
+				return nil
+			}
+
+			// Apply Temporal Disqualification Shield
+			if t.PublishedAt != "" && tmdbYear != "" {
+				premiereY, err := strconv.Atoi(tmdbYear)
+				if err == nil {
+					pubTs := parsePublishedAt(t.PublishedAt)
+					if isNewerShowDisqualified(pubTs, premiereY) {
+						return nil
+					}
+				}
 			}
 
 			// Find the title (primary or alternate) that actually matched
