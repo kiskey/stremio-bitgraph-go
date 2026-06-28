@@ -102,18 +102,9 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 	nameClean = strings.ReplaceAll(nameClean, ")", " ")
 	nameClean = strings.Join(strings.Fields(nameClean), " ")
 
-	// Detect if the show name is a single word or short stop-word
-	isShortOrStopWord := len(strings.Fields(nameClean)) == 1
-
-	var query string
-	if isShortOrStopWord {
-		// Do not wrap in double quotes, and do not append FTS negation operators.
-		// This forces Bitmagnet to fall back natively to its plain-text "search_string" matching,
-		// preventing the stop-word "From" from being completely erased.
-		query = nameClean
-	} else {
-		query = fmt.Sprintf(`"%s"`, nameClean)
-	}
+	// Strict enclosing double quotes are removed to ensure standard space-separated unquoted lexemes.
+	// This prevents FTS tokenizer and postgres stop-word position errors, maximizing search recall.
+	query := nameClean
 
 	if suffix != "" {
 		suffixClean := queryReplacer.Replace(suffix)
@@ -145,6 +136,21 @@ func deduplicateTorrents(items []bitmagnet.TorrentItem) []bitmagnet.TorrentItem 
 		}
 	}
 	return unique
+}
+
+func isVideoFile(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".mkv") ||
+		strings.HasSuffix(lower, ".mp4") ||
+		strings.HasSuffix(lower, ".avi") ||
+		strings.HasSuffix(lower, ".mov") ||
+		strings.HasSuffix(lower, ".wmv") ||
+		strings.HasSuffix(lower, ".flv") ||
+		strings.HasSuffix(lower, ".webm") ||
+		strings.HasSuffix(lower, ".m4v") ||
+		strings.HasSuffix(lower, ".ts") ||
+		strings.HasSuffix(lower, ".mpg") ||
+		strings.HasSuffix(lower, ".mpeg")
 }
 
 func streamHandler(w http.ResponseWriter, r *http.Request) {
@@ -586,7 +592,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					}
 					var videoFiles []bitmagnet.TorrentFile
 					for _, f := range files {
-						if f.FileType == "video" {
+						if f.FileType == "video" || isVideoFile(f.Path) {
 							videoFiles = append(videoFiles, f)
 						}
 					}
