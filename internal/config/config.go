@@ -32,7 +32,6 @@ var (
 	RealDebridEnabled   bool
 	DebridProvider      string
 	DebridCacheTable    string
-	NegateKeywords      []string // Optional server-side FTS negation keywords
 )
 
 func init() {
@@ -52,7 +51,7 @@ func init() {
 
 	AddonID = "org.stremio.go.bitmagnet"
 	AddonName = "GoMagnet"
-	AddonVersion = "7.2.2" // Incremented for SQLite migration release
+	AddonVersion = "7.2.3" // Incremented for TMDB on-demand daily show release
 
 	RealDebridAPIKey = os.Getenv("REALDEBRID_API_KEY")
 	TmdbAPIKey = os.Getenv("TMDB_API_KEY")
@@ -96,17 +95,6 @@ func init() {
 		}
 	}
 	DebridProvider = DebridService
-
-	// Parse optional comma-separated list of NEGATE_KEYWORDS
-	negateEnv := os.Getenv("NEGATE_KEYWORDS")
-	if negateEnv != "" {
-		for _, k := range strings.Split(negateEnv, ",") {
-			term := strings.TrimSpace(k)
-			if term != "" {
-				NegateKeywords = append(NegateKeywords, term)
-			}
-		}
-	}
 
 	var missing []string
 	if TmdbAPIKey == "" {
