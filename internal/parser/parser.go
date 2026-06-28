@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
@@ -716,6 +717,10 @@ func isDecimalDot(s string, i int) bool {
 }
 
 func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
+	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "")
+}
+
+func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, airDate string) (CandidateFile, bool) {
 	var bestCandidate CandidateFile
 	var found bool
 	var maxWeight int64 = -1
@@ -726,30 +731,51 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 		checkExtra = isExtraOrSpecialRelaxed
 	}
 
-	// 1. Direct and Range-based Scanning with Size-weighting
+	parts := strings.Split(airDate, "-")
+	var dotAirDate, dashAirDate, spaceAirDate string
+	if len(parts) == 3 {
+		dotAirDate = fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
+		dashAirDate = airDate
+		spaceAirDate = fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
+	}
+
+	// 1. Direct, Date, and Range-based Scanning with Size-weighting
 	for _, c := range candidates {
 		if checkExtra(c.Path) {
 			continue
 		}
 
-		cleanPath := normalizeEpisodePatterns(c.Path)
-		info := ParseFilePath(cleanPath, fallbackSeason)
-
 		matched := false
-		// Check standard parsing match
-		if info.Season == targetSeason && info.Episode == targetEpisode {
-			matched = true
+		lowerPath := strings.ToLower(c.Path)
+
+		// Check absolute air date match first for daily/long-running shows
+		if len(parts) == 3 {
+			if strings.Contains(lowerPath, dotAirDate) ||
+				strings.Contains(lowerPath, dashAirDate) ||
+				strings.Contains(lowerPath, spaceAirDate) {
+				matched = true
+			}
 		}
 
-		// Check multi-episode parsed array by releasetitleparser (if available)
-		parsedInfo := ParseFilePath(c.Path, fallbackSeason)
-		if parsedInfo.Season == targetSeason && parsedInfo.Episode == targetEpisode {
-			matched = true
-		}
+		if !matched {
+			cleanPath := normalizeEpisodePatterns(c.Path)
+			info := ParseFilePath(cleanPath, fallbackSeason)
 
-		// Check Range Regex (e.g. S01E21-22)
-		if !matched && info.Season == targetSeason && MatchRange(c.Path, targetEpisode) {
-			matched = true
+			// Check standard parsing match
+			if info.Season == targetSeason && info.Episode == targetEpisode {
+				matched = true
+			}
+
+			// Check multi-episode parsed array by releasetitleparser (if available)
+			parsedInfo := ParseFilePath(c.Path, fallbackSeason)
+			if parsedInfo.Season == targetSeason && parsedInfo.Episode == targetEpisode {
+				matched = true
+			}
+
+			// Check Range Regex (e.g. S01E21-22)
+			if !matched && info.Season == targetSeason && MatchRange(c.Path, targetEpisode) {
+				matched = true
+			}
 		}
 
 		if matched {
