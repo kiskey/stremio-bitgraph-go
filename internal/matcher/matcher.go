@@ -853,7 +853,7 @@ func stripDiacritics(s string) string {
 		"ñ", "n", "ç", "c",
 		"Ā", "A", "Á", "A", "À", "A", "Ä", "A", "Â", "A", "Ã", "A", "Å", "A",
 		"Ē", "E", "É", "E", "È", "E", "Ë", "E", "Ê", "E",
-		"Ī", "I", "Í", "I", "Ì", "I", "Ï", "I", "Î", "I",
+		"Ī", "I", "IGN", "I", "Ï", "I", "Î", "I",
 		"Ō", "O", "Ó", "O", "Ò", "O", "Ö", "O", "Ô", "O", "Õ", "O", "Ø", "O",
 		"Ū", "U", "Ú", "U", "Ù", "U", "Ü", "U", "Û", "U",
 		"Ý", "Y", "Ñ", "N", "Ç", "C",
@@ -929,7 +929,7 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 	sem := semaphore.NewWeighted(6)
 
 	for _, t := range torrents {
-		if t.Torrent.FilesStatus != "multi" || !t.Torrent.HasFilesInfo {
+		if !t.Torrent.HasFilesInfo {
 			continue
 		}
 		t := t
@@ -1021,7 +1021,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 		if cachedHashes[torrent.InfoHash] {
 			continue
 		}
-		if torrent.Torrent.FilesStatus == "multi" && torrent.Torrent.HasFilesInfo {
+		if torrent.Torrent.HasFilesInfo {
 			multiFileTorrents = append(multiFileTorrents, torrent)
 		}
 	}
@@ -1152,12 +1152,41 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 			}
 
 			if matchedSeasonEpisodeOrDate {
-				if td.FilesStatus == "single" {
+				isSeasonPack := (parsed.Season == season && (parsed.IsPack || parsed.Episode == 0)) || isMultiSeasonPack
+				files, ok := filesMap[t.InfoHash]
+
+				if ok && len(files) > 0 {
+					var candidates []parser.CandidateFile
+					for _, f := range files {
+						if f.FileType == "video" || isVideoFile(f.Path) {
+							candidates = append(candidates, parser.CandidateFile{
+								ID:   f.Index,
+								Path: f.Path,
+								Size: f.Size,
+							})
+						}
+					}
+					if bestFile, found := parser.FindBestSeriesFileLongRunning(candidates, season, episode, parsed.Season, airDate); found {
+						local = append(local, Stream{
+							InfoHash:    t.InfoHash,
+							FileIndex:   bestFile.ID,
+							TorrentName: td.Name,
+							Seeders:     t.Seeders,
+							Language:    bestLang,
+							Quality:     quality,
+							Size:        td.Size,
+							IsCached:    false,
+						})
+					}
+				} else {
+					// Fallback: If no files info is populated yet, match against the torrent name directly
 					matched := false
-					if parsed.Episode == episode {
+					if isSeasonPack {
 						matched = true
 					}
-					// Dynamic single-file range validation (Sonarr/Radarr compatible fallback)
+					if !matched && parsed.Episode == episode {
+						matched = true
+					}
 					if !matched && parser.MatchRange(td.Name, episode) {
 						matched = true
 					}
@@ -1175,75 +1204,11 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 							}
 						}
 					}
-					if !matched {
-						return nil
-					}
 
-					local = append(local, Stream{
-						InfoHash:    t.InfoHash,
-						FileIndex:   0,
-						TorrentName: td.Name,
-						Seeders:     t.Seeders,
-						Language:    bestLang,
-						Quality:     quality,
-						Size:        td.Size,
-						IsCached:    false,
-					})
-				} else if td.FilesStatus == "multi" {
-					files, ok := filesMap[t.InfoHash]
-					if !ok || len(files) == 0 {
-						// Fallback: If no files info is populated yet, match against the torrent name directly
-						matched := false
-						if parsed.Episode == episode {
-							matched = true
-						}
-						if !matched && parser.MatchRange(td.Name, episode) {
-							matched = true
-						}
-						if !matched && isLongRunning && airDate != "" {
-							parts := strings.Split(airDate, "-")
-							if len(parts) == 3 {
-								dotAirDate := fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
-								dashAirDate := airDate
-								spaceAirDate := fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
-								lowerName := strings.ToLower(td.Name)
-								if strings.Contains(lowerName, dotAirDate) || 
-								   strings.Contains(lowerName, dashAirDate) || 
-								   strings.Contains(lowerName, spaceAirDate) {
-									matched = true
-								}
-							}
-						}
-						if !matched {
-							return nil
-						}
-
+					if matched {
 						local = append(local, Stream{
 							InfoHash:    t.InfoHash,
 							FileIndex:   0,
-							TorrentName: td.Name,
-							Seeders:     t.Seeders,
-							Language:    bestLang,
-							Quality:     quality,
-							Size:        td.Size,
-							IsCached:    false,
-						})
-						return nil
-					}
-					var candidates []parser.CandidateFile
-					for _, f := range files {
-						if f.FileType == "video" || isVideoFile(f.Path) {
-							candidates = append(candidates, parser.CandidateFile{
-								ID:   f.Index,
-								Path: f.Path,
-								Size: f.Size,
-							})
-						}
-					}
-					if bestFile, found := parser.FindBestSeriesFileLongRunning(candidates, season, episode, parsed.Season, airDate); found {
-						local = append(local, Stream{
-							InfoHash:    t.InfoHash,
-							FileIndex:   bestFile.ID,
 							TorrentName: td.Name,
 							Seeders:     t.Seeders,
 							Language:    bestLang,
@@ -1321,7 +1286,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 		if cachedHashes[torrent.InfoHash] {
 			continue
 		}
-		if torrent.Torrent.FilesStatus == "multi" && torrent.Torrent.HasFilesInfo {
+		if torrent.Torrent.HasFilesInfo {
 			multiFileTorrents = append(multiFileTorrents, torrent)
 		}
 	}
@@ -1420,7 +1385,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				return nil
 			}
 
-			if td.FilesStatus == "multi" {
+			if td.HasFilesInfo {
 				files, ok := filesMap[t.InfoHash]
 				if ok && len(files) > 0 {
 					hasVideo := false
