@@ -853,7 +853,7 @@ func stripDiacritics(s string) string {
 		"ñ", "n", "ç", "c",
 		"Ā", "A", "Á", "A", "À", "A", "Ä", "A", "Â", "A", "Ã", "A", "Å", "A",
 		"Ē", "E", "É", "E", "È", "E", "Ë", "E", "Ê", "E",
-		"Ī", "I", "IGN", "I", "Ï", "I", "Î", "I",
+		"Ī", "I", "Í", "I", "Ì", "I", "Ï", "I", "Î", "I",
 		"Ō", "O", "Ó", "O", "Ò", "O", "Ö", "O", "Ô", "O", "Õ", "O", "Ø", "O",
 		"Ū", "U", "Ú", "U", "Ù", "U", "Ü", "U", "Û", "U",
 		"Ý", "Y", "Ñ", "N", "Ç", "C",
@@ -1028,6 +1028,8 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 
 	filesMap := fetchTorrentFilesConcurrent(ctx, multiFileTorrents)
 
+	utils.Logger.Debug("started series stream parsing", "new_torrents_count", len(newTorrents), "multi_file_count", len(multiFileTorrents), "files_map_resolved", len(filesMap))
+
 	type jobResult struct {
 		streams []Stream
 	}
@@ -1061,6 +1063,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 
 			// Apply Bayesian LLR Anime Gated Shield
 			if !EvaluateAnimeShield(td.Name, prior) {
+				utils.Logger.Debug("filtering out series torrent: failed anime shield", "name", td.Name)
 				return nil
 			}
 
@@ -1070,6 +1073,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 				if err == nil {
 					pubTs := parsePublishedAt(t.PublishedAt)
 					if isNewerShowDisqualified(pubTs, premiereY) {
+						utils.Logger.Debug("filtering out series torrent: failed temporal disqualification", "name", td.Name, "published", t.PublishedAt, "premiere", tmdbShow.PublishedAt)
 						return nil
 					}
 				}
@@ -1091,6 +1095,12 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 			}
 
 			if bestSim < config.SimilarityThreshold || matchingTitle == "" {
+				utils.Logger.Debug("filtering out series torrent: failed title similarity", 
+					"name", td.Name, 
+					"best_similarity", fmt.Sprintf("%.4f", bestSim), 
+					"threshold", config.SimilarityThreshold, 
+					"tmdb_title", tmdbShow.Title, 
+					"alt_titles", altTitles)
 				return nil
 			}
 
@@ -1177,6 +1187,8 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 							Size:        td.Size,
 							IsCached:    false,
 						})
+					} else {
+						utils.Logger.Debug("filtering out series torrent: files found, but none matched requested season/episode", "name", td.Name, "season", season, "episode", episode)
 					}
 				} else {
 					// Fallback: If no files info is populated yet, match against the torrent name directly
@@ -1216,8 +1228,23 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 							Size:        td.Size,
 							IsCached:    false,
 						})
+					} else {
+						utils.Logger.Debug("filtering out series torrent: fallback failed (no season pack or episode match)", 
+							"name", td.Name, 
+							"parsed_season", parsed.Season, 
+							"parsed_episode", parsed.Episode, 
+							"requested_season", season, 
+							"requested_episode", episode, 
+							"is_season_pack", isSeasonPack)
 					}
 				}
+			} else {
+				utils.Logger.Debug("filtering out series torrent: parsed season/episode/date does not match requested", 
+					"name", td.Name, 
+					"parsed_season", parsed.Season, 
+					"parsed_episode", parsed.Episode, 
+					"requested_season", season, 
+					"requested_episode", episode)
 			}
 
 			if len(local) > 0 {
@@ -1326,6 +1353,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 
 			// Apply Bayesian LLR Anime Gated Shield
 			if !EvaluateAnimeShield(td.Name, prior) {
+				utils.Logger.Debug("filtering out movie torrent: failed anime shield", "name", td.Name)
 				return nil
 			}
 
@@ -1335,6 +1363,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				if err == nil {
 					pubTs := parsePublishedAt(t.PublishedAt)
 					if isNewerShowDisqualified(pubTs, premiereY) {
+						utils.Logger.Debug("filtering out movie torrent: failed temporal disqualification", "name", td.Name, "published", t.PublishedAt, "premiere", tmdbYear)
 						return nil
 					}
 				}
@@ -1356,6 +1385,11 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			}
 
 			if bestSim < config.SimilarityThreshold || matchingTitle == "" {
+				utils.Logger.Debug("filtering out movie torrent: failed title similarity", 
+					"name", td.Name, 
+					"best_similarity", fmt.Sprintf("%.4f", bestSim), 
+					"threshold", config.SimilarityThreshold, 
+					"tmdb_title", tmdbMovie.Title)
 				return nil
 			}
 
@@ -1363,6 +1397,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 
 			// Type-Leakage Prevention: TV Series episodes/packs must never match as movie streams
 			if parsed.Season != 0 || parsed.Episode != 0 || parsed.IsPack {
+				utils.Logger.Debug("filtering out movie torrent: contains TV series indicators", "name", td.Name, "season", parsed.Season, "episode", parsed.Episode, "is_pack", parsed.IsPack)
 				return nil
 			}
 
@@ -1382,10 +1417,11 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				}
 			}
 			if !yearMatch {
+				utils.Logger.Debug("filtering out movie torrent: failed year match check", "name", td.Name, "parsed_year", parsed.Year, "tmdb_year", tmdbYear)
 				return nil
 			}
 
-			if td.HasFilesInfo {
+			if td.FilesStatus == "multi" {
 				files, ok := filesMap[t.InfoHash]
 				if ok && len(files) > 0 {
 					hasVideo := false
