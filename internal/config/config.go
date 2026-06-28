@@ -51,7 +51,7 @@ func init() {
 
 	AddonID = "org.stremio.go.bitmagnet"
 	AddonName = "GoMagnet"
-	AddonVersion = "7.2.3" // Incremented for TMDB on-demand daily show release
+	AddonVersion = "7.3.0" // Incremented for long-running show support and negate operator removal
 
 	RealDebridAPIKey = os.Getenv("REALDEBRID_API_KEY")
 	TmdbAPIKey = os.Getenv("TMDB_API_KEY")
