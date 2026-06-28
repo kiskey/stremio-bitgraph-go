@@ -112,7 +112,10 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 		// preventing the stop-word "From" from being completely erased.
 		query = nameClean
 	} else {
-		query = fmt.Sprintf(`"%s"`, nameClean)
+		// Do not wrap in double quotes to prevent overly restrictive phrasal queries.
+		// Unquoted terms allow websearch_to_tsquery to do implicit AND, ensuring broader matching
+		// and avoiding stop-word poisoning / ordering issues.
+		query = nameClean
 	}
 
 	if suffix != "" {
@@ -121,10 +124,11 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 	}
 
 	// Append FTS Negation Keywords only for standard, non-stop-word titles
+	// Uses PostgreSQL websearch negation syntax ("-") instead of the broken "!" operator
 	if !isShortOrStopWord && len(config.NegateKeywords) > 0 {
 		var negations []string
 		for _, k := range config.NegateKeywords {
-			negations = append(negations, fmt.Sprintf("!%s", queryReplacer.Replace(k)))
+			negations = append(negations, fmt.Sprintf("-%s", queryReplacer.Replace(k)))
 		}
 		query = fmt.Sprintf("%s %s", query, strings.Join(negations, " "))
 	}
@@ -200,6 +204,12 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			query := buildOptimizedQuery(meta.Name, meta.AltTitles, meta.Year)
 			torrents, searchErr = bitmagnet.SearchTorrents(ctx, query, contentType, 100)
+			// Fallback Search Strategy (Stage 2): If year-scoped search returned 0 results, query again without the year suffix
+			if searchErr == nil && len(torrents) == 0 && meta.Year != "" {
+				utils.Logger.Info("movie search with year returned 0 results, running fallback search without year", "title", meta.Name)
+				fallbackQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, "")
+				torrents, searchErr = bitmagnet.SearchTorrents(ctx, fallbackQuery, contentType, 100)
+			}
 			if searchErr == nil && len(torrents) > 0 {
 				searchCache.Set(searchCacheKey, torrents)
 			}
@@ -304,6 +314,30 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		})
 
 		_ = g.Wait()
+
+		// Fallback Search Strategy (Stage 2): If year-scoped queries returned 0 results, repeat both queries without the year suffix
+		if len(refinedTorrents) == 0 && len(broadTorrents) == 0 && meta.Year != "" {
+			utils.Logger.Info("series search with year returned 0 results, running fallback searches without year", "title", meta.Name)
+			gFallback, gFallbackCtx := errgroup.WithContext(ctx)
+			
+			gFallback.Go(func() error {
+				suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
+				refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
+				var innerErr error
+				refinedTorrents, innerErr = bitmagnet.SearchTorrents(gFallbackCtx, refinedQuery, "tv_show", 50)
+				return innerErr
+			})
+			
+			gFallback.Go(func() error {
+				suffix := sPadded
+				broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
+				var innerErr error
+				broadTorrents, innerErr = bitmagnet.SearchTorrents(gFallbackCtx, broadQuery, "tv_show", 100)
+				return innerErr
+			})
+			
+			_ = gFallback.Wait()
+		}
 
 		// Pass the retrieved primary title & its compiled alternate titles list to the matcher.
 		// We use PublishedAt inside TorrentItem as a zero-allocation vector to pass the premiere year.
