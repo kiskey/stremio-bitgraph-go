@@ -505,6 +505,26 @@ func SanitizeName(name string) string {
 	return s
 }
 
+// Precompiled regex matching leading season/episode patterns (e.g., S01E01, [S01E01], 2x03, [2x03])
+var leadingEpPatternRe = regexp.MustCompile(`(?i)^[\s\-_.]*\[?(S\d+E\d+|\b\d+x\d+\b)\]?[\s\-_.]*`)
+
+// ShiftLeadingEpisodePattern transposes any leading episode pattern to the end of the string
+// so that releasetitleparser can cleanly extract the series title.
+func ShiftLeadingEpisodePattern(s string) string {
+	if match := leadingEpPatternRe.FindStringSubmatch(s); len(match) > 1 {
+		matchedStr := match[0]
+		epPattern := match[1]
+
+		// Strip the pattern from the front
+		stripped := s[len(matchedStr):]
+		stripped = strings.TrimSpace(stripped)
+
+		// Append the episode pattern to the end
+		return fmt.Sprintf("%s %s", stripped, epPattern)
+	}
+	return s
+}
+
 func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	parseCacheMu.RLock()
 	entry, ok := parseCache[title]
@@ -513,7 +533,8 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 		return entry.result
 	}
 
-	clean := SanitizeName(title)
+	preprocessedTitle := ShiftLeadingEpisodePattern(title)
+	clean := SanitizeName(preprocessedTitle)
 
 	var result *ParseResult
 	info := rtp.ParseSeriesTitle(clean)
@@ -716,10 +737,6 @@ func isDecimalDot(s string, i int) bool {
 	return left >= '0' && left <= '9' && right >= '0' && right <= '9'
 }
 
-func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
-	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "")
-}
-
 func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, airDate string) (CandidateFile, bool) {
 	var bestCandidate CandidateFile
 	var found bool
@@ -827,10 +844,8 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 		if targetEpisode > 0 && targetEpisode <= len(seasonMatches) {
 			candidate := seasonMatches[targetEpisode-1]
 
-			// Defensive Verification: Ensure the sequential fallback has no explicit numeric mismatch
 			candParsed := ParseFilePath(candidate.Path, fallbackSeason)
 			if candParsed.Episode != 0 && candParsed.Episode != targetEpisode {
-				// Avoid aborting on valid conjoined multi-episode ranges containing this episode
 				if !MatchRange(candidate.Path, targetEpisode) {
 					return CandidateFile{}, false
 				}
@@ -840,4 +855,8 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 	}
 
 	return CandidateFile{}, false
+}
+
+func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
+	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "")
 }
