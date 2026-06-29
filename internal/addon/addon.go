@@ -373,6 +373,17 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			SeasonEpisodeCount: seasonEpisodeCount,
 		}
 
+		// Extract the specific air date of the requested episode from metadata for long-running matching structures
+		var airDate string
+		if seasonDetails != nil {
+			for _, ep := range seasonDetails.Episodes {
+				if ep.EpisodeNumber == episode {
+					airDate = ep.AirDate
+					break
+				}
+			}
+		}
+
 		// Highly cohesive, metadata-driven structural cadence analysis
 		isLongRunning := meta.IsLongRunning
 		if !isLongRunning && seasonDetails != nil {
