@@ -500,15 +500,25 @@ func SanitizeName(name string) string {
 	s = normalizeEpisodePatterns(s)
 
 	// 3. Remove non-ASCII scripts (Chinese, Cyrillic, Japanese, etc.)
-	var b strings.Builder
-	for _, r := range s {
-		if r > unicode.MaxASCII {
-			b.WriteRune(' ')
-			continue
+	hasNonASCII := false
+	for i := 0; i < len(s); i++ {
+		if s[i] > 127 {
+			hasNonASCII = true
+			break
 		}
-		b.WriteRune(r)
 	}
-	s = b.String()
+	if hasNonASCII {
+		var b strings.Builder
+		b.Grow(len(s))
+		for _, r := range s {
+			if r > unicode.MaxASCII {
+				b.WriteRune(' ')
+				continue
+			}
+			b.WriteRune(r)
+		}
+		s = b.String()
+	}
 
 	// 4. Remove residual URLs/domains (e.g. www.BTHDTV.com)
 	s = urlRegex.ReplaceAllString(s, " ")
