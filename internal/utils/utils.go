@@ -121,7 +121,7 @@ func SanitizeName(name string) string {
 	return s
 }
 
-// Extended Quality Sorting Stack containing positive low-quality demoted priority indices
+// Extended Quality Sorting Stack with positive low-quality demoted priority indices (v7.3.5)
 var QualityOrder = map[string]int{
 	"4k":       1,
 	"2160p":    1,
@@ -135,7 +135,7 @@ var QualityOrder = map[string]int{
 	"ts":       9,  // Telesync Quality
 	"cam":      10, // Camrip Quality
 	"wp":       11, // Workprint Quality
-	"regional": 12, // Regional R5/R6 Line Audio Release Quality
+	"regional": 12, // Regional R5/R6 Line Audio Quality
 }
 
 func GetQuality(resolution string) string {
