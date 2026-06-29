@@ -51,7 +51,7 @@ func init() {
 
 	AddonID = "org.stremio.go.bitmagnet"
 	AddonName = "GoMagnet"
-	AddonVersion = "7.3.6" // Graded positive curation engine for CAM/TS/HQ-HDRip
+	AddonVersion = "7.3.6" // Incremented for clean positive low-quality curation engine (v7.3.6)
 
 	RealDebridAPIKey = os.Getenv("REALDEBRID_API_KEY")
 	TmdbAPIKey = os.Getenv("TMDB_API_KEY")
