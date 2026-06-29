@@ -652,7 +652,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		var multiHashes []string
 		for _, t := range torrents {
 			torrentMap[t.InfoHash] = t
-			if t.Torrent.HasFilesInfo {
+			if t.Torrent.HasFilesInfo || t.Torrent.FilesStatus == "multi" {
 				multiHashes = append(multiHashes, t.InfoHash)
 			}
 		}
@@ -682,7 +682,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 
 		for i := range sorted {
 			if sorted[i].FileIndex == 0 {
-				if t, ok := torrentMap[sorted[i].InfoHash]; ok && t.Torrent.HasFilesInfo {
+				if t, ok := torrentMap[sorted[i].InfoHash]; ok && (t.Torrent.HasFilesInfo || t.Torrent.FilesStatus == "multi") {
 					files, ok := filesMap[sorted[i].InfoHash]
 					if !ok || len(files) == 0 {
 						sorted[i].FileIndex = 0
@@ -721,7 +721,10 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			langFlag := strings.ToUpper(s.Language)
-			matchedBadges := parser.FormatBadges(s.TorrentName)
+			matchedBadges := s.Badges
+			if matchedBadges == "" {
+				matchedBadges = parser.FormatBadges(s.TorrentName)
+			}
 
 			// Formulate Stream Name (the button text)
 			streamName := fmt.Sprintf("[%s %s] %s | %s | %s", prefix, providerLabel, langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
@@ -763,7 +766,10 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			langFlag := strings.ToUpper(s.Language)
-			matchedBadges := parser.FormatBadges(s.TorrentName)
+			matchedBadges := s.Badges
+			if matchedBadges == "" {
+				matchedBadges = parser.FormatBadges(s.TorrentName)
+			}
 
 			// Formulate Stream Name (the button text)
 			streamName := fmt.Sprintf("[🧲 P2P] %s | %s | %s", langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
