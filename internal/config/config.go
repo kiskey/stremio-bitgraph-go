@@ -51,7 +51,7 @@ func init() {
 
 	AddonID = "org.stremio.go.bitmagnet"
 	AddonName = "GoMagnet"
-	AddonVersion = "7.3.6" // Incremented for clean positive low-quality curation engine (v7.3.6)
+	AddonVersion = "7.3.6" // Incremented to version 7.3.6 for positive low-quality curation engine strictly on top of clean core
 
 	RealDebridAPIKey = os.Getenv("REALDEBRID_API_KEY")
 	TmdbAPIKey = os.Getenv("TMDB_API_KEY")
