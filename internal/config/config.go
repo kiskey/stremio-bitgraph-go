@@ -32,6 +32,7 @@ var (
 	RealDebridEnabled   bool
 	DebridProvider      string
 	DebridCacheTable    string
+	BitmagnetSearchLimit int // Configurable search limit to prevent FTS saturation
 )
 
 func init() {
@@ -95,6 +96,11 @@ func init() {
 		}
 	}
 	DebridProvider = DebridService
+
+	BitmagnetSearchLimit, _ = strconv.Atoi(os.Getenv("BITMAGNET_LIMIT"))
+	if BitmagnetSearchLimit == 0 {
+		BitmagnetSearchLimit = 250 // Increased default from 100 to 250 for robust stream recall
+	}
 
 	var missing []string
 	if TmdbAPIKey == "" {
