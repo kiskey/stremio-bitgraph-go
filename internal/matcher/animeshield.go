@@ -63,36 +63,44 @@ func isNewerShowDisqualified(fileTs int64, premiereYear int) bool {
 }
 
 func ClassifyTargetPrior(meta AnimePriorMeta) float64 {
+	// Safeguard 1: If the show is NOT animated, it cannot be anime.
+	// Force the score below the threshold of 3.0 so that the Anime Shield is never triggered for live action.
+	if !meta.IsAnimation {
+		return -10.0 // Strictly live-action, never triggers anime-release expectations
+	}
+
 	var score float64 = 0.0
 	lang := strings.ToLower(meta.OriginalLanguage)
 
 	switch lang {
 	case "ja":
-		score += 6.0
+		score += 10.0 // Strengthen Japanese language baseline
 	case "en":
-		score -= 1.0
+		score -= 10.0 // Strongly penalize English language baseline for animation
 	case "zh":
-		score += 1.0
+		score += 5.0
 	case "ko":
-		score += 0.5
+		score += 3.0
 	}
 
-	if meta.IsAnimation {
-		score += 10.0
-	}
-
-	if (meta.IsAnimation || lang == "ja" || lang == "zh" || lang == "ko") && meta.SeasonEpisodeCount > 30 {
-		score += 8.0
-	} else if meta.SeasonEpisodeCount >= 8 && meta.SeasonEpisodeCount <= 15 {
-		score -= 2.0
-	}
-
+	// Double-down on origin country to separate Western Animation from Japanese Anime
+	isEasternAsia := false
 	for _, c := range meta.OriginCountries {
 		if c == "JP" {
-			score += 3.0
-		} else if c == "US" {
-			score -= 1.5
+			score += 10.0
+			isEasternAsia = true
+		} else if c == "CN" || c == "TW" || c == "KR" {
+			score += 5.0
+			isEasternAsia = true
+		} else if c == "US" || c == "CA" || c == "GB" || c == "FR" || c == "DE" || c == "AU" {
+			score -= 10.0
 		}
+	}
+
+	// Safeguard 2: If it is animated, but original language is English and origin is not Eastern Asia,
+	// it is structurally a Western cartoon (e.g., South Park, Rick and Morty, The Simpsons).
+	if lang == "en" && !isEasternAsia {
+		return -5.0
 	}
 
 	return score
