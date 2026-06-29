@@ -117,6 +117,9 @@ var compactRegex = regexp.MustCompile(`(?i)\bE(\d{2})(\d{2})\b`)
 // Radarr/Sonarr Website Domain Prefix Stripper - Upgraded to safely exclude movie titles matching [a-z0-9-]+\.[a-z]{2,6} by limiting allowed TLD extensions
 var websitePrefixRegex = regexp.MustCompile(`(?i)(?:^|[\s_.-]*)(?:(?:www\d*\.)[a-z0-9-]+\.[a-z]{2,6}\b|\[\s*(?:www\d*\.)?[a-z0-9-]+\.[a-z]{2,6}\s*\]|[a-z0-9-]+\.(?:com|net|org|co|info|yt|tf|re|pm|club|xyz|site|online|me|tv|cc|ws|to|biz|us|uk|ca|in|app|link|io|ag|am|cat|best|release|pe|wf|cx|gd|la|mu|ms|nu|se|tc|vc|vg)\b)[\s_.-]*`)
 
+// Match common decimal channel audio configurations (e.g. 5.1, 7.1, 2.0) to prevent TV show misclassifications
+var audioChannelsRegex = regexp.MustCompile(`(?i)\b([1-9])\.([0-9])\b`)
+
 // Conjoined metadata regexes with strict lower-bounds of 3 characters to prevent short-word collisions (e.g. Scratch1080p, Scratchx264, S01WEBRip)
 var conjoinedQualityRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
 var conjoinedCodecRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(x264|x265|h264|h265|hevc|avc)\b`)
@@ -473,6 +476,9 @@ func getQuality(res int) string {
 func SanitizeName(name string) string {
 	// Strip Radarr/Sonarr-style Website Prefix Domains (e.g. www.1TamilMV.yt - or [TamilBlasters.gripe] ) before parsing
 	s := websitePrefixRegex.ReplaceAllString(name, "")
+
+	// Replace audio channels like 5.1, 7.1, 2.0 with 5ch, 7ch, 2ch to prevent dot replacement from tokenizing them as series season/episode numbers (e.g. 5 1)
+	s = audioChannelsRegex.ReplaceAllString(s, "${1}ch")
 
 	// Insert spaces before conjoined technical keywords to prevent unified word tokenization failures (e.g. Scratch1080p -> Scratch 1080p)
 	s = conjoinedQualityRegex.ReplaceAllString(s, "$1 $2")
