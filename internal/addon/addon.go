@@ -51,7 +51,7 @@ type Stream struct {
 
 var searchCache = utils.NewTTLCache(5 * time.Minute)
 
-// Compile-time optimized replacement string structure
+// Carbon-copy query replacer to prevent FTS symbol confusion
 var queryReplacer = strings.NewReplacer("\\", "", "\"", "")
 
 // Pre-compiled global regular expression to prevent GC pressure and lookahead errors during live stream serving
@@ -102,9 +102,9 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 	nameClean = strings.ReplaceAll(nameClean, ")", " ")
 	nameClean = strings.Join(strings.Fields(nameClean), " ")
 
-	// Strict enclosing double quotes are removed to ensure standard space-separated unquoted lexemes.
-	// This prevents FTS tokenizer and postgres stop-word position errors, maximizing search recall.
-	query := nameClean
+	// Wrap the core title name in double quotes to execute an exact phrase search at the Bitmagnet/Postgres FTS level.
+	// This prevents common prepositions/single-word titles from getting heavily diluted by description or meta tags.
+	query := fmt.Sprintf("\"%s\"", nameClean)
 
 	if suffix != "" {
 		suffixClean := queryReplacer.Replace(suffix)
@@ -265,7 +265,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			query := buildOptimizedQuery(meta.Name, meta.AltTitles, meta.Year)
-			torrents, searchErr = bitmagnet.SearchTorrents(ctx, query, contentType, 100)
+			torrents, searchErr = bitmagnet.SearchTorrents(ctx, query, contentType, config.BitmagnetSearchLimit)
 			if searchErr == nil && len(torrents) > 0 {
 				searchCache.Set(searchCacheKey, torrents)
 			}
@@ -353,6 +353,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				OriginalLanguage: meta.OriginalLanguage,
 				OriginCountries:  meta.OriginCountries,
 				IsAnimation:      meta.IsAnimation,
+				IsLongRunning:    meta.IsLongRunning,
 			}
 		}
 
@@ -372,27 +373,15 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			SeasonEpisodeCount: seasonEpisodeCount,
 		}
 
-		isLongRunning := false
-		var airDate string
-		if seasonDetails != nil {
-			for _, ep := range seasonDetails.Episodes {
-				if ep.EpisodeNumber == episode {
-					airDate = ep.AirDate
-					break
-				}
-			}
-			nameLower := strings.ToLower(meta.Name)
-			if strings.Contains(nameLower, "cooku with comali") || 
-			   strings.Contains(nameLower, "the daily show") || 
-			   strings.Contains(nameLower, "tonight show") || 
-			   strings.Contains(nameLower, "jimmy kimmel") || 
-			   strings.Contains(nameLower, "late show") || 
-			   strings.Contains(nameLower, "saturday night live") ||
-			   strings.Contains(nameLower, "jeopardy") ||
-			   strings.Contains(nameLower, "wheel of fortune") ||
-			   seasonEpisodeCount > 20 {
+		// Highly cohesive, metadata-driven structural cadence analysis
+		isLongRunning := meta.IsLongRunning
+		if !isLongRunning && seasonDetails != nil {
+			if seasonDetails.DetermineLongRunningByCadence() {
 				isLongRunning = true
 			}
+		}
+		if !isLongRunning && seasonEpisodeCount > 20 {
+			isLongRunning = true
 		}
 
 		filteredAlts := filterAlternativeTitles(contentType, meta.Name, meta.AltTitles)
@@ -405,7 +394,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			// Refined: Absolute date and SXXEXX / SXEX combinations
 			g.Go(func() error {
 				query := buildOptimizedQuery(meta.Name, filteredAlts, fmt.Sprintf("%sE%02d", sPadded, episode))
-				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
 				if err == nil {
 					refinedMu.Lock()
 					refinedTorrents = append(refinedTorrents, res...)
@@ -415,7 +404,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			})
 			g.Go(func() error {
 				query := buildOptimizedQuery(meta.Name, filteredAlts, fmt.Sprintf("S%dE%d", season, episode))
-				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
 				if err == nil {
 					refinedMu.Lock()
 					refinedTorrents = append(refinedTorrents, res...)
@@ -436,7 +425,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 						fmtStr := fmtStr
 						g.Go(func() error {
 							query := buildOptimizedQuery(meta.Name, filteredAlts, fmtStr)
-							res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+							res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
 							if err == nil {
 								refinedMu.Lock()
 								refinedTorrents = append(refinedTorrents, res...)
@@ -451,7 +440,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			// Broad: Season variations
 			g.Go(func() error {
 				query := buildOptimizedQuery(meta.Name, filteredAlts, fmt.Sprintf("Season %d", season))
-				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
 				if err == nil {
 					broadMu.Lock()
 					broadTorrents = append(broadTorrents, res...)
@@ -461,7 +450,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			})
 			g.Go(func() error {
 				query := buildOptimizedQuery(meta.Name, filteredAlts, sPadded)
-				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
 				if err == nil {
 					broadMu.Lock()
 					broadTorrents = append(broadTorrents, res...)
@@ -471,7 +460,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			})
 			g.Go(func() error {
 				query := buildOptimizedQuery(meta.Name, filteredAlts, fmt.Sprintf("S%d", season))
-				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
 				if err == nil {
 					broadMu.Lock()
 					broadTorrents = append(broadTorrents, res...)
@@ -488,7 +477,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
 				}
 				query := buildOptimizedQuery(meta.Name, filteredAlts, suffix)
-				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
 				if err == nil {
 					refinedMu.Lock()
 					refinedTorrents = append(refinedTorrents, res...)
@@ -502,7 +491,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				g.Go(func() error {
 					suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
 					query := buildOptimizedQuery(meta.Name, filteredAlts, suffix)
-					res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+					res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
 					if err == nil {
 						refinedMu.Lock()
 						refinedTorrents = append(refinedTorrents, res...)
@@ -519,7 +508,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
 				}
 				query := buildOptimizedQuery(meta.Name, filteredAlts, suffix)
-				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
 				if err == nil {
 					broadMu.Lock()
 					broadTorrents = append(broadTorrents, res...)
@@ -533,7 +522,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				g.Go(func() error {
 					suffix := sPadded
 					query := buildOptimizedQuery(meta.Name, filteredAlts, suffix)
-					res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", 100)
+					res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
 					if err == nil {
 						broadMu.Lock()
 						broadTorrents = append(broadTorrents, res...)
