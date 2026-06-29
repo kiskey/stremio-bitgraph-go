@@ -146,9 +146,6 @@ var ignoredNumbers = map[string]bool{
 
 var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to)\s*0*(\d+)\b`)
 
-// In-memory undesirable releases keywords to prevent FTS negation bypass on stop-word searches
-var undesirableKeywords = []string{"3d", "cam", "screener", "hdcam", "hdts", "predvd", "dvdscr"}
-
 // Self-Learning Entropy Engine Global State Variables
 var (
 	entropyOnce      sync.Once
@@ -260,23 +257,6 @@ func isBlockedArchive(name string) bool {
 		strings.HasSuffix(lower, ".tar") ||
 		strings.HasSuffix(lower, ".tgz") ||
 		strings.HasSuffix(lower, ".gz")
-}
-
-// isUndesirableRelease performs a standard lookahead-free boundaries check inside Go memory space
-func isUndesirableRelease(name string) bool {
-	lower := strings.ToLower(name)
-	for _, k := range undesirableKeywords {
-		idx := strings.Index(lower, k)
-		if idx != -1 {
-			// Validate POSIX boundaries natively to prevent false positive matches
-			startBound := idx == 0 || !isAlphaNum(lower[idx-1])
-			endBound := idx+len(k) == len(lower) || !isAlphaNum(lower[idx+len(k)])
-			if startBound && endBound {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func isAlphaNum(c byte) bool {
@@ -853,7 +833,7 @@ func stripDiacritics(s string) string {
 		"ñ", "n", "ç", "c",
 		"Ā", "A", "Á", "A", "À", "A", "Ä", "A", "Â", "A", "Ã", "A", "Å", "A",
 		"Ē", "E", "É", "E", "È", "E", "Ë", "E", "Ê", "E",
-		"Ī", "I", "Í", "I", "Ì", "I", "Ï", "I", "Î", "I",
+		"Ī", "I", "IGN", "I", "Ï", "I", "Î", "I",
 		"Ō", "O", "Ó", "O", "Ò", "O", "Ö", "O", "Ô", "O", "Õ", "O", "Ø", "O",
 		"Ū", "U", "Ú", "U", "Ù", "U", "Ü", "U", "Û", "U",
 		"Ý", "Y", "Ñ", "N", "Ç", "C",
@@ -1421,7 +1401,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				return nil
 			}
 
-			if td.FilesStatus == "multi" {
+			if td.HasFilesInfo {
 				files, ok := filesMap[t.InfoHash]
 				if ok && len(files) > 0 {
 					hasVideo := false
