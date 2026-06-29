@@ -1432,8 +1432,23 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 
 			// Type-Leakage Prevention: TV Series episodes/packs must never match as movie streams
 			if parsed.Season != 0 || parsed.Episode != 0 || parsed.IsPack {
-				utils.Logger.Debug("filtering out movie torrent: contains TV series indicators", "name", td.Name, "season", parsed.Season, "episode", parsed.Episode, "is_pack", parsed.IsPack)
-				return nil
+				// Guardrail: If Season/Episode match common audio configurations (5.1 -> S05E01 or 7.1 -> S07E01)
+				// and the title does NOT explicitly declare typical series patterns, bypass series rejection.
+				isAudioFakeSeries := false
+				if (parsed.Season == 5 && parsed.Episode == 1) || (parsed.Season == 7 && parsed.Episode == 1) || (parsed.Season == 2 && parsed.Episode == 0) {
+					lowerName := strings.ToLower(td.Name)
+					hasExplicitSeason := strings.Contains(lowerName, "s05") || strings.Contains(lowerName, "season 5") || strings.Contains(lowerName, "season.5") ||
+						strings.Contains(lowerName, "s07") || strings.Contains(lowerName, "season 7") || strings.Contains(lowerName, "season.7") ||
+						strings.Contains(lowerName, "s02") || strings.Contains(lowerName, "season 2") || strings.Contains(lowerName, "season.2")
+					if !hasExplicitSeason {
+						isAudioFakeSeries = true
+					}
+				}
+
+				if !isAudioFakeSeries {
+					utils.Logger.Debug("filtering out movie torrent: contains TV series indicators", "name", td.Name, "season", parsed.Season, "episode", parsed.Episode, "is_pack", parsed.IsPack)
+					return nil
+				}
 			}
 
 			// ── UPGRADE: PN-SILEC Multi-Word Franchise Leakage Guardrail (Movie) ──
