@@ -135,6 +135,39 @@ var conjoinedDigitToCodec = regexp.MustCompile(`(?i)\b(\d+)(x264|x265|h264|h265|
 // Unified metadata boundary pattern to slice titles cleanly at the earliest occurrence of any noise/season tags (Including standard audio codecs)
 var boundaryRegex = regexp.MustCompile(`(?i)\b(?:S\d+E\d+|S\d+|\d+x\d+|Season\s*\d+|Seasons\s*\d+|2160p|1080p|720p|480p|360p|4k|uhd|bluray|hdtv|web[-_.]?dl|webrip|hdr|sdr|h264|h265|x264|x265|hevc|ddp|dd\+|eac3|truehd|atmos|ac3|dts|aac|mp3|flac|19\d{2}|20\d{2})\b`)
 
+// Fail-safe positive curation engines regex matches based on TRaSH Guides and Servarr pipelines
+var (
+	wpRegex  = regexp.MustCompile(`(?i)\b(?:workprint|wp)\b`)
+	camRegex = regexp.MustCompile(`(?i)\b(?:cam|camrip|hdcam|cam-?rip)\b`)
+	tsRegex  = regexp.MustCompile(`(?i)\b(?:ts|hdts|telesync|tele-?sync|ppvrip|pdvdrip)\b`)
+	tcRegex  = regexp.MustCompile(`(?i)\b(?:tc|hdtc|telecine|tele-?cine)\b`)
+	scrRegex = regexp.MustCompile(`(?i)\b(?:scr|screener|dvdscr|bdscr|dvd-?scr|ddc|dvdscreener)\b`)
+	r5Regex  = regexp.MustCompile(`(?i)\b(?:r5|r6|r5line|r5.line|line.audio|ac3md|ac3ld|line.dub)\b`)
+)
+
+func DetectLowQuality(title string) string {
+	lower := strings.ToLower(title)
+	if camRegex.MatchString(lower) {
+		return "cam"
+	}
+	if tsRegex.MatchString(lower) {
+		return "ts"
+	}
+	if tcRegex.MatchString(lower) {
+		return "tc"
+	}
+	if scrRegex.MatchString(lower) {
+		return "scr"
+	}
+	if wpRegex.MatchString(lower) {
+		return "wp"
+	}
+	if r5Regex.MatchString(lower) {
+		return "regional"
+	}
+	return ""
+}
+
 // Low-Allocation pre-defined filters deconstructed from Perl badges.json to RE2 standard.
 // Matches exactly all 39 filters defined in badges.json with extended support for NF and AMZN.
 var filtersDef = []struct {
