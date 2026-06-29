@@ -42,6 +42,7 @@ type MetaResult struct {
 	OriginalLanguage string
 	OriginCountries  []string
 	IsAnimation      bool
+	IsLongRunning    bool // Dynamically determined via TMDB genres (Talk/News/Soap)
 }
 
 type TVSeasonResult struct {
@@ -54,11 +55,50 @@ type TVEpisode struct {
 	Name          string `json:"name"`
 }
 
+// DetermineLongRunningByCadence computes the mathematical average air-date interval between episodes.
+// If average frequency is <= 3.5 days, the show is structurally classified as daily/long-running.
+func (s *TVSeasonResult) DetermineLongRunningByCadence() bool {
+	if s == nil || len(s.Episodes) < 3 {
+		return false
+	}
+
+	validCount := 0
+	var totalDiff time.Duration
+	var lastTime time.Time
+
+	for _, ep := range s.Episodes {
+		if ep.AirDate == "" {
+			continue
+		}
+		t, err := time.Parse("2006-01-02", ep.AirDate)
+		if err != nil {
+			continue
+		}
+		if validCount > 0 {
+			diff := t.Sub(lastTime)
+			if diff > 0 {
+				totalDiff += diff
+				validCount++
+			}
+		} else {
+			validCount = 1
+		}
+		lastTime = t
+	}
+
+	if validCount > 1 {
+		avgDays := totalDiff.Hours() / 24.0 / float64(validCount-1)
+		return avgDays <= 3.5
+	}
+	return false
+}
+
 type TMDBDetails struct {
 	TMDBID           string
 	OriginalLanguage string
 	OriginCountries  []string
 	IsAnimation      bool
+	IsLongRunning    bool // Dynamically determined via TMDB genres (Talk/News/Soap)
 }
 
 // Low-Allocation Structs for TMDB Deserialization
@@ -105,7 +145,7 @@ func stripDiacritics(s string) string {
 		"ñ", "n", "ç", "c",
 		"Ā", "A", "Á", "A", "À", "A", "Ä", "A", "Â", "A", "Ã", "A", "Å", "A",
 		"Ē", "E", "É", "E", "È", "E", "Ë", "E", "Ê", "E",
-		"Ī", "I", "Í", "I", "Ì", "I", "Ï", "I", "Î", "I",
+		"Ī", "I", "Í", "I", "Ï", "I", "Î", "I",
 		"Ō", "O", "Ó", "O", "Ò", "O", "Ö", "O", "Ô", "O", "Õ", "O", "Ø", "O",
 		"Ū", "U", "Ú", "U", "Ù", "U", "Ü", "U", "Û", "U",
 		"Ý", "Y", "Ñ", "N", "Ç", "C",
@@ -168,6 +208,7 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 		var origLang string
 		var originCountries []string
 		isAnimation := false
+		isLongRunning := false
 
 		if typ == "series" {
 			if len(data.TvResults) == 0 {
@@ -187,7 +228,10 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 			for _, gID := range item.GenreIDs {
 				if gID == 16 {
 					isAnimation = true
-					break
+				}
+				// 10767 = Talk, 10763 = News, 10766 = Soap
+				if gID == 10767 || gID == 10763 || gID == 10766 {
+					isLongRunning = true
 				}
 			}
 		} else {
@@ -221,6 +265,7 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 			OriginalLanguage: origLang,
 			OriginCountries:  originCountries,
 			IsAnimation:      isAnimation,
+			IsLongRunning:    isLongRunning,
 		}, nil
 	})
 }
@@ -414,7 +459,9 @@ func ResolveTMDBDetails(ctx context.Context, imdbID, typ string) (TMDBDetails, e
 			for _, gID := range item.GenreIDs {
 				if gID == 16 {
 					details.IsAnimation = true
-					break
+				}
+				if gID == 10767 || gID == 10763 || gID == 10766 {
+					details.IsLongRunning = true
 				}
 			}
 			return details, nil
