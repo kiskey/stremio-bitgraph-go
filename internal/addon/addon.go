@@ -51,7 +51,7 @@ type Stream struct {
 
 var searchCache = utils.NewTTLCache(5 * time.Minute)
 
-// Compile-time optimized replacement string structure
+// Carbon-copy query replacer to prevent FTS symbol confusion
 var queryReplacer = strings.NewReplacer("\\", "", "\"", "")
 
 // Pre-compiled global regular expression to prevent GC pressure and lookahead errors during live stream serving
@@ -102,31 +102,13 @@ func buildOptimizedQuery(name string, altTitles []string, suffix string) string 
 	nameClean = strings.ReplaceAll(nameClean, ")", " ")
 	nameClean = strings.Join(strings.Fields(nameClean), " ")
 
-	// Detect if the show name is a single word or short stop-word
-	isShortOrStopWord := len(strings.Fields(nameClean)) == 1
-
-	var query string
-	if isShortOrStopWord {
-		// Do not wrap in double quotes, and do not append FTS negation operators.
-		// This forces Bitmagnet to fall back natively to its plain-text "search_string" matching,
-		// preventing the stop-word "From" from being completely erased.
-		query = nameClean
-	} else {
-		query = fmt.Sprintf(`"%s"`, nameClean)
-	}
+	// Wrap the core title name in double quotes to execute an exact phrase search at the Bitmagnet/Postgres FTS level.
+	// This prevents common prepositions/single-word titles from getting heavily diluted by description or meta tags.
+	query := fmt.Sprintf("\"%s\"", nameClean)
 
 	if suffix != "" {
 		suffixClean := queryReplacer.Replace(suffix)
 		query = fmt.Sprintf("%s %s", query, suffixClean)
-	}
-
-	// Append FTS Negation Keywords only for standard, non-stop-word titles
-	if !isShortOrStopWord && len(config.NegateKeywords) > 0 {
-		var negations []string
-		for _, k := range config.NegateKeywords {
-			negations = append(negations, fmt.Sprintf("!%s", queryReplacer.Replace(k)))
-		}
-		query = fmt.Sprintf("%s %s", query, strings.Join(negations, " "))
 	}
 
 	return query
@@ -142,6 +124,90 @@ func checkPackOrRange(name string, targetE int) string {
 		return fmt.Sprintf(" (🔢 Batch E%02d-%02d)", start, end)
 	}
 	return ""
+}
+
+func deduplicateTorrents(items []bitmagnet.TorrentItem) []bitmagnet.TorrentItem {
+	seen := make(map[string]bool)
+	var unique []bitmagnet.TorrentItem
+	for _, item := range items {
+		if !seen[item.InfoHash] {
+			seen[item.InfoHash] = true
+			unique = append(unique, item)
+		}
+	}
+	return unique
+}
+
+func isVideoFile(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".mkv") ||
+		strings.HasSuffix(lower, ".mp4") ||
+		strings.HasSuffix(lower, ".avi") ||
+		strings.HasSuffix(lower, ".mov") ||
+		strings.HasSuffix(lower, ".wmv") ||
+		strings.HasSuffix(lower, ".flv") ||
+		strings.HasSuffix(lower, ".webm") ||
+		strings.HasSuffix(lower, ".m4v") ||
+		strings.HasSuffix(lower, ".ts") ||
+		strings.HasSuffix(lower, ".mpg") ||
+		strings.HasSuffix(lower, ".mpeg")
+}
+
+// Spinoff Identification & Pruning (Series-Scoped)
+var spinoffKeywords = []string{"special", "edited", "saga", "recap", "scenes", "interview", "letter", "spinoff", "movie", "film", "ova", "ona", "oad", "re-edited", "collaboration", "crossover"}
+
+func isSpinoff(title, primaryName string) bool {
+	lowerTitle := strings.ToLower(title)
+	lowerPrimary := strings.ToLower(primaryName)
+	
+	for _, kw := range spinoffKeywords {
+		if strings.Contains(lowerTitle, kw) && !strings.Contains(lowerPrimary, kw) {
+			return true
+		}
+	}
+	
+	if len(primaryName) > 0 {
+		if float64(len(title))/float64(len(primaryName)) > 2.5 {
+			return true
+		}
+		if strings.Contains(lowerTitle, lowerPrimary) && len(strings.Fields(title)) > len(strings.Fields(primaryName)) {
+			return true
+		}
+	}
+	if len(strings.Fields(title)) > 4 {
+		return true
+	}
+	return false
+}
+
+func filterAlternativeTitles(contentType string, name string, alternativeNames []string) []string {
+	var filtered []string
+	for _, alt := range alternativeNames {
+		if contentType == "series" && isSpinoff(alt, name) {
+			continue
+		}
+		
+		isDup := false
+		if parser.SanitizeName(alt) == parser.SanitizeName(name) {
+			isDup = true
+		}
+		for _, f := range filtered {
+			if parser.SanitizeName(f) == parser.SanitizeName(alt) {
+				isDup = true
+				break
+			}
+		}
+		
+		if !isDup {
+			filtered = append(filtered, alt)
+		}
+	}
+	
+	// Cap to prevent search query explosion
+	if len(filtered) > 2 {
+		filtered = filtered[:2]
+	}
+	return filtered
 }
 
 func streamHandler(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +265,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			query := buildOptimizedQuery(meta.Name, meta.AltTitles, meta.Year)
-			torrents, searchErr = bitmagnet.SearchTorrents(ctx, query, contentType, 100)
+			torrents, searchErr = bitmagnet.SearchTorrents(ctx, query, contentType, config.BitmagnetSearchLimit)
 			if searchErr == nil && len(torrents) > 0 {
 				searchCache.Set(searchCacheKey, torrents)
 			}
@@ -274,45 +340,221 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			sPadded = fmt.Sprintf("S%d", sVal)
 		}
 
+		tmdbID := meta.TMDBID
+		var details metadata.TMDBDetails
+		if tmdbID == "" {
+			if d, err := metadata.ResolveTMDBDetails(ctx, imdbID, typ); err == nil {
+				details = d
+				tmdbID = d.TMDBID
+			}
+		} else {
+			details = metadata.TMDBDetails{
+				TMDBID:           meta.TMDBID,
+				OriginalLanguage: meta.OriginalLanguage,
+				OriginCountries:  meta.OriginCountries,
+				IsAnimation:      meta.IsAnimation,
+				IsLongRunning:    meta.IsLongRunning,
+			}
+		}
+
+		var seasonDetails *metadata.TVSeasonResult
+		seasonEpisodeCount := 0
+		if tmdbID != "" {
+			if sDetails, err := metadata.GetTVSeasonDetails(ctx, tmdbID, season); err == nil {
+				seasonDetails = sDetails
+				seasonEpisodeCount = len(sDetails.Episodes)
+			}
+		}
+
+		priorMeta := matcher.AnimePriorMeta{
+			OriginalLanguage:   details.OriginalLanguage,
+			OriginCountries:    details.OriginCountries,
+			IsAnimation:        details.IsAnimation,
+			SeasonEpisodeCount: seasonEpisodeCount,
+		}
+
+		// Extract the specific air date of the requested episode from metadata for long-running matching structures
+		var airDate string
+		if seasonDetails != nil {
+			for _, ep := range seasonDetails.Episodes {
+				if ep.EpisodeNumber == episode {
+					airDate = ep.AirDate
+					break
+				}
+			}
+		}
+
+		// Highly cohesive, metadata-driven structural cadence analysis
+		isLongRunning := meta.IsLongRunning
+		if !isLongRunning && seasonDetails != nil {
+			if seasonDetails.DetermineLongRunningByCadence() {
+				isLongRunning = true
+			}
+		}
+		if !isLongRunning && seasonEpisodeCount > 20 {
+			isLongRunning = true
+		}
+
+		filteredAlts := filterAlternativeTitles(contentType, meta.Name, meta.AltTitles)
+
 		var refinedTorrents, broadTorrents []bitmagnet.TorrentItem
+		var refinedMu, broadMu sync.Mutex
 		g, gCtx := errgroup.WithContext(ctx)
 
-		// Refined Query: Combines target show title, episode block, and premiere year (e.g. From S02E09 2022)
-		// This forces PostgreSQL FTS to filter strictly by your show's launch year, preventing stop-word failures.
-		g.Go(func() error {
-			suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
-			if meta.Year != "" {
-				suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
+		if isLongRunning {
+			// Refined: Absolute date and SXXEXX / SXEX combinations
+			g.Go(func() error {
+				query := buildOptimizedQuery(meta.Name, filteredAlts, fmt.Sprintf("%sE%02d", sPadded, episode))
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
+				if err == nil {
+					refinedMu.Lock()
+					refinedTorrents = append(refinedTorrents, res...)
+					refinedMu.Unlock()
+				}
+				return err
+			})
+			g.Go(func() error {
+				query := buildOptimizedQuery(meta.Name, filteredAlts, fmt.Sprintf("S%dE%d", season, episode))
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
+				if err == nil {
+					refinedMu.Lock()
+					refinedTorrents = append(refinedTorrents, res...)
+					refinedMu.Unlock()
+				}
+				return err
+			})
+			if airDate != "" {
+				parts := strings.Split(airDate, "-")
+				if len(parts) == 3 {
+					y, m, d := parts[0], parts[1], parts[2]
+					dateFormats := []string{
+						fmt.Sprintf("%s.%s.%s", y, m, d),
+						fmt.Sprintf("%s-%s-%s", y, m, d),
+						fmt.Sprintf("%s %s %s", y, m, d),
+					}
+					for _, fmtStr := range dateFormats {
+						fmtStr := fmtStr
+						g.Go(func() error {
+							query := buildOptimizedQuery(meta.Name, filteredAlts, fmtStr)
+							res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
+							if err == nil {
+								refinedMu.Lock()
+								refinedTorrents = append(refinedTorrents, res...)
+								refinedMu.Unlock()
+							}
+							return err
+						})
+					}
+				}
 			}
-			refinedQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
-			var innerErr error
-			refinedTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, refinedQuery, "tv_show", 50)
-			return innerErr
-		})
 
-		// Broad Query: Combines target show title, season block, and premiere year (e.g. From S02 2022)
-		// Guarantees that complete season packs are returned even if the FTS strips the show's name.
-		g.Go(func() error {
-			suffix := sPadded
+			// Broad: Season variations
+			g.Go(func() error {
+				query := buildOptimizedQuery(meta.Name, filteredAlts, fmt.Sprintf("Season %d", season))
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
+				if err == nil {
+					broadMu.Lock()
+					broadTorrents = append(broadTorrents, res...)
+					broadMu.Unlock()
+				}
+				return err
+			})
+			g.Go(func() error {
+				query := buildOptimizedQuery(meta.Name, filteredAlts, sPadded)
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
+				if err == nil {
+					broadMu.Lock()
+					broadTorrents = append(broadTorrents, res...)
+					broadMu.Unlock()
+				}
+				return err
+			})
+			g.Go(func() error {
+				query := buildOptimizedQuery(meta.Name, filteredAlts, fmt.Sprintf("S%d", season))
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
+				if err == nil {
+					broadMu.Lock()
+					broadTorrents = append(broadTorrents, res...)
+					broadMu.Unlock()
+				}
+				return err
+			})
+		} else {
+			// Regular Series: Follows existing year patterns with no-year fallback queries
+			// 1. Refined with Year
+			g.Go(func() error {
+				suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
+				if meta.Year != "" {
+					suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
+				}
+				query := buildOptimizedQuery(meta.Name, filteredAlts, suffix)
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
+				if err == nil {
+					refinedMu.Lock()
+					refinedTorrents = append(refinedTorrents, res...)
+					refinedMu.Unlock()
+				}
+				return err
+			})
+
+			// 2. Refined WITHOUT Year (Ensures newer seasons of decade-spanning shows match)
 			if meta.Year != "" {
-				suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
+				g.Go(func() error {
+					suffix := fmt.Sprintf("%sE%02d", sPadded, episode)
+					query := buildOptimizedQuery(meta.Name, filteredAlts, suffix)
+					res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
+					if err == nil {
+						refinedMu.Lock()
+						refinedTorrents = append(refinedTorrents, res...)
+						refinedMu.Unlock()
+					}
+					return err
+				})
 			}
-			broadQuery := buildOptimizedQuery(meta.Name, meta.AltTitles, suffix)
-			var innerErr error
-			broadTorrents, innerErr = bitmagnet.SearchTorrents(gCtx, broadQuery, "tv_show", 100)
-			return innerErr
-		})
+
+			// 3. Broad with Year
+			g.Go(func() error {
+				suffix := sPadded
+				if meta.Year != "" {
+					suffix = fmt.Sprintf("%s %s", suffix, meta.Year)
+				}
+				query := buildOptimizedQuery(meta.Name, filteredAlts, suffix)
+				res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
+				if err == nil {
+					broadMu.Lock()
+					broadTorrents = append(broadTorrents, res...)
+					broadMu.Unlock()
+				}
+				return err
+			})
+
+			// 4. Broad WITHOUT Year (Ensures newer season packs match)
+			if meta.Year != "" {
+				g.Go(func() error {
+					suffix := sPadded
+					query := buildOptimizedQuery(meta.Name, filteredAlts, suffix)
+					res, err := bitmagnet.SearchTorrents(gCtx, query, "tv_show", config.BitmagnetSearchLimit)
+					if err == nil {
+						broadMu.Lock()
+						broadTorrents = append(broadTorrents, res...)
+						broadMu.Unlock()
+					}
+					return err
+				})
+			}
+		}
 
 		_ = g.Wait()
 
-		// Pass the retrieved primary title & its compiled alternate titles list to the matcher.
-		// We use PublishedAt inside TorrentItem as a zero-allocation vector to pass the premiere year.
-		refinedResult, refinedCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, meta.AltTitles, season, episode, refinedTorrents, cachedRows, config.PreferredLanguages)
+		refinedTorrents = deduplicateTorrents(refinedTorrents)
+		broadTorrents = deduplicateTorrents(broadTorrents)
+
+		refinedResult, refinedCached := matcher.FindBestSeriesStreamsLongRunning(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, filteredAlts, season, episode, refinedTorrents, cachedRows, config.PreferredLanguages, isLongRunning, airDate, priorMeta)
 		resultStreams = refinedResult
 		cachedStreams = refinedCached
 
 		if len(refinedTorrents) < 10 || len(resultStreams) == 0 {
-			broadResult, broadCached := matcher.FindBestSeriesStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, meta.AltTitles, season, episode, broadTorrents, cachedRows, config.PreferredLanguages)
+			broadResult, broadCached := matcher.FindBestSeriesStreamsLongRunning(ctx, &bitmagnet.TorrentItem{Title: meta.Name, PublishedAt: meta.Year}, filteredAlts, season, episode, broadTorrents, cachedRows, config.PreferredLanguages, isLongRunning, airDate, priorMeta)
 			existing := make(map[string]bool)
 			for _, s := range resultStreams {
 				existing[s.InfoHash] = true
@@ -335,7 +577,28 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		movieResult, movieCached := matcher.FindBestMovieStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, meta.AltTitles, meta.Year, torrents, cachedRows, config.PreferredLanguages)
+		var details metadata.TMDBDetails
+		tmdbID := meta.TMDBID
+		if tmdbID == "" {
+			if d, err := metadata.ResolveTMDBDetails(ctx, imdbID, typ); err == nil {
+				details = d
+			}
+		} else {
+			details = metadata.TMDBDetails{
+				TMDBID:           meta.TMDBID,
+				OriginalLanguage: meta.OriginalLanguage,
+				OriginCountries:  meta.OriginCountries,
+				IsAnimation:      meta.IsAnimation,
+			}
+		}
+
+		priorMeta := matcher.AnimePriorMeta{
+			OriginalLanguage: details.OriginalLanguage,
+			OriginCountries:  details.OriginCountries,
+			IsAnimation:      details.IsAnimation,
+		}
+
+		movieResult, movieCached := matcher.FindBestMovieStreams(ctx, &bitmagnet.TorrentItem{Title: meta.Name}, meta.AltTitles, meta.Year, torrents, cachedRows, config.PreferredLanguages, priorMeta)
 		resultStreams = movieResult
 		cachedStreams = movieCached
 	}
@@ -389,7 +652,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		var multiHashes []string
 		for _, t := range torrents {
 			torrentMap[t.InfoHash] = t
-			if t.Torrent.FilesStatus == "multi" {
+			if t.Torrent.HasFilesInfo || t.Torrent.FilesStatus == "multi" {
 				multiHashes = append(multiHashes, t.InfoHash)
 			}
 		}
@@ -419,7 +682,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 
 		for i := range sorted {
 			if sorted[i].FileIndex == 0 {
-				if t, ok := torrentMap[sorted[i].InfoHash]; ok && t.Torrent.FilesStatus == "multi" {
+				if t, ok := torrentMap[sorted[i].InfoHash]; ok && (t.Torrent.HasFilesInfo || t.Torrent.FilesStatus == "multi") {
 					files, ok := filesMap[sorted[i].InfoHash]
 					if !ok || len(files) == 0 {
 						sorted[i].FileIndex = 0
@@ -427,7 +690,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 					}
 					var videoFiles []bitmagnet.TorrentFile
 					for _, f := range files {
-						if f.FileType == "video" {
+						if f.FileType == "video" || isVideoFile(f.Path) {
 							videoFiles = append(videoFiles, f)
 						}
 					}
@@ -458,7 +721,10 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			langFlag := strings.ToUpper(s.Language)
-			matchedBadges := parser.FormatBadges(s.TorrentName)
+			matchedBadges := s.Badges
+			if matchedBadges == "" {
+				matchedBadges = parser.FormatBadges(s.TorrentName)
+			}
 
 			// Formulate Stream Name (the button text)
 			streamName := fmt.Sprintf("[%s %s] %s | %s | %s", prefix, providerLabel, langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))
@@ -500,7 +766,10 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			langFlag := strings.ToUpper(s.Language)
-			matchedBadges := parser.FormatBadges(s.TorrentName)
+			matchedBadges := s.Badges
+			if matchedBadges == "" {
+				matchedBadges = parser.FormatBadges(s.TorrentName)
+			}
 
 			// Formulate Stream Name (the button text)
 			streamName := fmt.Sprintf("[🧲 P2P] %s | %s | %s", langFlag, strings.ToUpper(s.Quality), utils.FormatSize(s.Size))

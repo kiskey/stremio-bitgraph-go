@@ -86,8 +86,14 @@ var epPatternRegex = regexp.MustCompile(`(?i)(S\d+)?[\s\-_]*\bEP[\s\-_]*[\(\[]?\
 var urlRegex = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
 var bracketRegex = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
 
+// Match common decimal channel audio configurations (e.g. 5.1, 7.1, 2.0) to prevent TV show misclassifications
+var audioChannelsRegex = regexp.MustCompile(`(?i)\b([1-9])\.([0-9])\b`)
+
 func SanitizeName(name string) string {
 	s := name
+
+	// Replace audio channels like 5.1, 7.1, 2.0 with 5ch, 7ch, 2ch to prevent dot replacement from tokenizing them as series season/episode numbers (e.g. 5 1)
+	s = audioChannelsRegex.ReplaceAllString(s, "${1}ch")
 
 	// 1. Normalize special unicode spaces (e.g. \u00a0, \u200b) to standard spaces
 	s = strings.ReplaceAll(s, "\u00a0", " ")
@@ -97,15 +103,25 @@ func SanitizeName(name string) string {
 	s = epPatternRegex.ReplaceAllString(s, "${1}E${2}")
 
 	// 3. Remove non-ASCII scripts (Chinese, Cyrillic, Japanese, etc.)
-	var b strings.Builder
-	for _, r := range s {
-		if r > unicode.MaxASCII {
-			b.WriteRune(' ')
-			continue
+	hasNonASCII := false
+	for i := 0; i < len(s); i++ {
+		if s[i] > 127 {
+			hasNonASCII = true
+			break
 		}
-		b.WriteRune(r)
 	}
-	s = b.String()
+	if hasNonASCII {
+		var b strings.Builder
+		b.Grow(len(s))
+		for _, r := range s {
+			if r > unicode.MaxASCII {
+				b.WriteRune(' ')
+				continue
+			}
+			b.WriteRune(r)
+		}
+		s = b.String()
+	}
 
 	// 4. Remove residual URLs/domains (e.g. www.BTHDTV.com)
 	s = urlRegex.ReplaceAllString(s, " ")
@@ -121,14 +137,21 @@ func SanitizeName(name string) string {
 	return s
 }
 
+// Extended Quality Sorting Stack containing positive low-quality demoted priority indices
 var QualityOrder = map[string]int{
-	"4k":    1,
-	"2160p": 1,
-	"1080p": 2,
-	"720p":  3,
-	"480p":  4,
-	"360p":  5,
-	"sd":    6,
+	"4k":       1,
+	"2160p":    1,
+	"1080p":    2,
+	"720p":     3,
+	"480p":     4,
+	"360p":     5,
+	"sd":       6,
+	"scr":      7,  // Screener Quality
+	"tc":       8,  // Telecine Quality
+	"ts":       9,  // Telesync Quality
+	"cam":      10, // Camrip Quality
+	"wp":       11, // Workprint Quality
+	"regional": 12, // Regional R5/R6 Line Audio Release Quality
 }
 
 func GetQuality(resolution string) string {

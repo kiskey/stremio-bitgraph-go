@@ -34,23 +34,91 @@ func init() {
 }
 
 type MetaResult struct {
-	Name      string
-	Year      string
-	Source    string
-	AltTitles []string
+	Name             string
+	Year             string
+	Source           string
+	AltTitles        []string
+	TMDBID           string
+	OriginalLanguage string
+	OriginCountries  []string
+	IsAnimation      bool
+	IsLongRunning    bool // Dynamically determined via TMDB genres (Talk/News/Soap)
+}
+
+type TVSeasonResult struct {
+	Episodes []TVEpisode `json:"episodes"`
+}
+
+type TVEpisode struct {
+	EpisodeNumber int    `json:"episode_number"`
+	AirDate       string `json:"air_date"`
+	Name          string `json:"name"`
+}
+
+// DetermineLongRunningByCadence computes the mathematical average air-date interval between episodes.
+// If average frequency is <= 3.5 days, the show is structurally classified as daily/long-running.
+func (s *TVSeasonResult) DetermineLongRunningByCadence() bool {
+	if s == nil || len(s.Episodes) < 3 {
+		return false
+	}
+
+	validCount := 0
+	var totalDiff time.Duration
+	var lastTime time.Time
+
+	for _, ep := range s.Episodes {
+		if ep.AirDate == "" {
+			continue
+		}
+		t, err := time.Parse("2006-01-02", ep.AirDate)
+		if err != nil {
+			continue
+		}
+		if validCount > 0 {
+			diff := t.Sub(lastTime)
+			if diff > 0 {
+				totalDiff += diff
+				validCount++
+			}
+		} else {
+			validCount = 1
+		}
+		lastTime = t
+	}
+
+	if validCount > 1 {
+		avgDays := totalDiff.Hours() / 24.0 / float64(validCount-1)
+		return avgDays <= 3.5
+	}
+	return false
+}
+
+type TMDBDetails struct {
+	TMDBID           string
+	OriginalLanguage string
+	OriginCountries  []string
+	IsAnimation      bool
+	IsLongRunning    bool // Dynamically determined via TMDB genres (Talk/News/Soap)
 }
 
 // Low-Allocation Structs for TMDB Deserialization
 type tmdbFindResponse struct {
 	MovieResults []struct {
-		Title         string `json:"title"`
-		ReleaseDate   string `json:"release_date"`
-		OriginalTitle string `json:"original_title"`
+		ID               json.Number `json:"id"`
+		Title            string      `json:"title"`
+		ReleaseDate      string      `json:"release_date"`
+		OriginalTitle    string      `json:"original_title"`
+		OriginalLanguage string      `json:"original_language"`
+		GenreIDs         []int       `json:"genre_ids"`
 	} `json:"movie_results"`
 	TvResults []struct {
-		Name         string `json:"name"`
-		FirstAirDate string `json:"first_air_date"`
-		OriginalName string `json:"original_name"`
+		ID               json.Number `json:"id"`
+		Name             string      `json:"name"`
+		FirstAirDate     string      `json:"first_air_date"`
+		OriginalName     string      `json:"original_name"`
+		OriginalLanguage string      `json:"original_language"`
+		OriginCountry    []string    `json:"origin_country"`
+		GenreIDs         []int       `json:"genre_ids"`
 	} `json:"tv_results"`
 }
 
@@ -77,7 +145,7 @@ func stripDiacritics(s string) string {
 		"ñ", "n", "ç", "c",
 		"Ā", "A", "Á", "A", "À", "A", "Ä", "A", "Â", "A", "Ã", "A", "Å", "A",
 		"Ē", "E", "É", "E", "È", "E", "Ë", "E", "Ê", "E",
-		"Ī", "I", "Í", "I", "Ì", "I", "Ï", "I", "Î", "I",
+		"Ī", "I", "Í", "I", "Ï", "I", "Î", "I",
 		"Ō", "O", "Ó", "O", "Ò", "O", "Ö", "O", "Ô", "O", "Õ", "O", "Ø", "O",
 		"Ū", "U", "Ú", "U", "Ù", "U", "Ü", "U", "Û", "U",
 		"Ý", "Y", "Ñ", "N", "Ç", "C",
@@ -135,8 +203,13 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 			return nil, err
 		}
 
-		name, year := "", ""
+		name, year, tmdbID := "", "", ""
 		var altTitles []string
+		var origLang string
+		var originCountries []string
+		isAnimation := false
+		isLongRunning := false
+
 		if typ == "series" {
 			if len(data.TvResults) == 0 {
 				return nil, fmt.Errorf("not found")
@@ -148,6 +221,18 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 			}
 			if item.OriginalName != "" && item.OriginalName != name {
 				altTitles = append(altTitles, item.OriginalName)
+			}
+			tmdbID = item.ID.String()
+			origLang = item.OriginalLanguage
+			originCountries = item.OriginCountry
+			for _, gID := range item.GenreIDs {
+				if gID == 16 {
+					isAnimation = true
+				}
+				// 10767 = Talk, 10763 = News, 10766 = Soap
+				if gID == 10767 || gID == 10763 || gID == 10766 {
+					isLongRunning = true
+				}
 			}
 		} else {
 			if len(data.MovieResults) == 0 {
@@ -161,9 +246,27 @@ func fetchTmdb(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 			if item.OriginalTitle != "" && item.OriginalTitle != name {
 				altTitles = append(altTitles, item.OriginalTitle)
 			}
+			tmdbID = item.ID.String()
+			origLang = item.OriginalLanguage
+			for _, gID := range item.GenreIDs {
+				if gID == 16 {
+					isAnimation = true
+					break
+				}
+			}
 		}
 
-		return &MetaResult{Name: name, Year: year, Source: "TMDB", AltTitles: altTitles}, nil
+		return &MetaResult{
+			Name:             name,
+			Year:             year,
+			Source:           "TMDB",
+			AltTitles:        altTitles,
+			TMDBID:           tmdbID,
+			OriginalLanguage: origLang,
+			OriginCountries:  originCountries,
+			IsAnimation:      isAnimation,
+			IsLongRunning:    isLongRunning,
+		}, nil
 	})
 }
 
@@ -298,6 +401,112 @@ func fetchTrakt(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
 		}
 		return &MetaResult{Name: name, Year: year, Source: "Trakt", AltTitles: nil}, nil
 	})
+}
+
+func ResolveTMDBID(ctx context.Context, imdbID, typ string) (string, error) {
+	url := fmt.Sprintf("https://api.themoviedb.org/3/find/%s?api_key=%s&external_source=imdb_id", imdbID, config.TmdbAPIKey)
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := tmdbClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("tmdb find status %d", resp.StatusCode)
+	}
+
+	var data tmdbFindResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", err
+	}
+
+	if typ == "series" {
+		if len(data.TvResults) > 0 {
+			return data.TvResults[0].ID.String(), nil
+		}
+	} else {
+		if len(data.MovieResults) > 0 {
+			return data.MovieResults[0].ID.String(), nil
+		}
+	}
+	return "", fmt.Errorf("tmdb id not found")
+}
+
+func ResolveTMDBDetails(ctx context.Context, imdbID, typ string) (TMDBDetails, error) {
+	url := fmt.Sprintf("https://api.themoviedb.org/3/find/%s?api_key=%s&external_source=imdb_id", imdbID, config.TmdbAPIKey)
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := tmdbClient.Do(req)
+	if err != nil {
+		return TMDBDetails{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return TMDBDetails{}, fmt.Errorf("tmdb find status %d", resp.StatusCode)
+	}
+
+	var data tmdbFindResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return TMDBDetails{}, err
+	}
+
+	var details TMDBDetails
+	if typ == "series" {
+		if len(data.TvResults) > 0 {
+			item := data.TvResults[0]
+			details.TMDBID = item.ID.String()
+			details.OriginalLanguage = item.OriginalLanguage
+			details.OriginCountries = item.OriginCountry
+			for _, gID := range item.GenreIDs {
+				if gID == 16 {
+					details.IsAnimation = true
+				}
+				if gID == 10767 || gID == 10763 || gID == 10766 {
+					details.IsLongRunning = true
+				}
+			}
+			return details, nil
+		}
+	} else {
+		if len(data.MovieResults) > 0 {
+			item := data.MovieResults[0]
+			details.TMDBID = item.ID.String()
+			details.OriginalLanguage = item.OriginalLanguage
+			for _, gID := range item.GenreIDs {
+				if gID == 16 {
+					details.IsAnimation = true
+					break
+				}
+			}
+			return details, nil
+		}
+	}
+	return TMDBDetails{}, fmt.Errorf("tmdb id not found")
+}
+
+func GetTVSeasonDetails(ctx context.Context, tmdbID string, seasonNumber int) (*TVSeasonResult, error) {
+	cacheKey := fmt.Sprintf("tv_season_%s_%d", tmdbID, seasonNumber)
+	if v, ok := metaCache.Get(cacheKey); ok {
+		return v.(*TVSeasonResult), nil
+	}
+
+	url := fmt.Sprintf("https://api.themoviedb.org/3/tv/%s/season/%d?api_key=%s", tmdbID, seasonNumber, config.TmdbAPIKey)
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := tmdbClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("tmdb season status %d", resp.StatusCode)
+	}
+
+	var result TVSeasonResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	metaCache.Set(cacheKey, &result)
+	return &result, nil
 }
 
 func GetMetaDetails(ctx context.Context, imdbID, typ string) (*MetaResult, error) {
