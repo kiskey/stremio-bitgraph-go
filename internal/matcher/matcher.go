@@ -833,7 +833,7 @@ func stripDiacritics(s string) string {
 		"ñ", "n", "ç", "c",
 		"Ā", "A", "Á", "A", "À", "A", "Ä", "A", "Â", "A", "Ã", "A", "Å", "A",
 		"Ē", "E", "É", "E", "È", "E", "Ë", "E", "Ê", "E",
-		"Ī", "I", "IGN", "I", "Ï", "I", "Î", "I",
+		"Ī", "I", "Í", "I", "Ï", "I", "Î", "I",
 		"Ō", "O", "Ó", "O", "Ò", "O", "Ö", "O", "Ô", "O", "Õ", "O", "Ø", "O",
 		"Ū", "U", "Ú", "U", "Ù", "U", "Ü", "U", "Û", "U",
 		"Ý", "Y", "Ñ", "N", "Ç", "C",
@@ -1026,8 +1026,8 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 		if torrentData.Name == "" {
 			continue
 		}
-		if isBlockedArchive(torrentData.Name) || isUndesirableRelease(torrentData.Name) {
-			utils.Logger.Warn("filtering out series torrent: matches compressed archive or undesirable pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
+		if isBlockedArchive(torrentData.Name) {
+			utils.Logger.Warn("filtering out series torrent: matches compressed archive pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
 			continue
 		}
 
@@ -1101,7 +1101,9 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 				bestLang = parsed.Language
 			}
 			quality := utils.GetQuality(t.VideoResolution)
-			if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
+			if parsed.Quality == "cam" || parsed.Quality == "ts" || parsed.Quality == "tc" || parsed.Quality == "scr" || parsed.Quality == "wp" || parsed.Quality == "regional" {
+				quality = parsed.Quality
+			} else if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
 				quality = parsed.Quality
 			}
 
@@ -1249,6 +1251,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 
 func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem, altTitles []string, tmdbYear string, newTorrents []bitmagnet.TorrentItem, cachedRows []map[string]interface{}, preferredLanguages []string, prior AnimePriorMeta) (streams []Stream, cachedStreams []Stream) {
 	// Dynamically load the self-learning Entropy Engine exactly once on the first query execution.
+	// This eliminates startup circular dependency import cycles and cold-start latencies.
 	entropyOnce.Do(func() {
 		utils.Logger.Info("Entropy Engine: Initiating self-learning parser scan...")
 		InitializeEntropyEngine(context.Background())
@@ -1316,8 +1319,8 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 		if torrentData.Name == "" {
 			continue
 		}
-		if isBlockedArchive(torrentData.Name) || isUndesirableRelease(torrentData.Name) {
-			utils.Logger.Warn("filtering out movie torrent: matches compressed archive or undesirable pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
+		if isBlockedArchive(torrentData.Name) {
+			utils.Logger.Warn("filtering out movie torrent: matches compressed archive pattern", "name", torrentData.Name, "hash", torrent.InfoHash)
 			continue
 		}
 
@@ -1431,7 +1434,9 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				bestLang = parsed.Language
 			}
 			quality := utils.GetQuality(t.VideoResolution)
-			if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
+			if parsed.Quality == "cam" || parsed.Quality == "ts" || parsed.Quality == "tc" || parsed.Quality == "scr" || parsed.Quality == "wp" || parsed.Quality == "regional" {
+				quality = parsed.Quality
+			} else if (quality == "sd" || quality == "") && parsed.Quality != "sd" && parsed.Quality != "" {
 				quality = parsed.Quality
 			}
 
