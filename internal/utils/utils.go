@@ -121,14 +121,21 @@ func SanitizeName(name string) string {
 	return s
 }
 
+// Extended Quality Sorting Stack containing positive low-quality demoted priority indices
 var QualityOrder = map[string]int{
-	"4k":    1,
-	"2160p": 1,
-	"1080p": 2,
-	"720p":  3,
-	"480p":  4,
-	"360p":  5,
-	"sd":    6,
+	"4k":       1,
+	"2160p":    1,
+	"1080p":    2,
+	"720p":     3,
+	"480p":     4,
+	"360p":     5,
+	"sd":       6,
+	"scr":      7,  // Screener Quality
+	"tc":       8,  // Telecine Quality
+	"ts":       9,  // Telesync Quality
+	"cam":      10, // Camrip Quality
+	"wp":       11, // Workprint Quality
+	"regional": 12, // Regional R5/R6 Line Audio Release Quality
 }
 
 func GetQuality(resolution string) string {
