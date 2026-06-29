@@ -136,13 +136,14 @@ var conjoinedDigitToCodec = regexp.MustCompile(`(?i)\b(\d+)(x264|x265|h264|h265|
 var boundaryRegex = regexp.MustCompile(`(?i)\b(?:S\d+E\d+|S\d+|\d+x\d+|Season\s*\d+|Seasons\s*\d+|2160p|1080p|720p|480p|360p|4k|uhd|bluray|hdtv|web[-_.]?dl|webrip|hdr|sdr|h264|h265|x264|x265|hevc|ddp|dd\+|eac3|truehd|atmos|ac3|dts|aac|mp3|flac|19\d{2}|20\d{2})\b`)
 
 // Fail-safe positive curation engines regex matches based on TRaSH Guides and Servarr pipelines
+// Expanded to handle complex variations of PreDVD and deceptive HQRip naming conventions
 var (
 	wpRegex  = regexp.MustCompile(`(?i)\b(?:workprint|wp)\b`)
 	camRegex = regexp.MustCompile(`(?i)\b(?:cam|camrip|hdcam|cam-?rip)\b`)
 	tsRegex  = regexp.MustCompile(`(?i)\b(?:ts|hdts|telesync|tele-?sync|ppvrip|pdvdrip)\b`)
 	tcRegex  = regexp.MustCompile(`(?i)\b(?:tc|hdtc|telecine|tele-?cine)\b`)
-	scrRegex = regexp.MustCompile(`(?i)\b(?:scr|screener|dvdscr|bdscr|dvd-?scr|ddc|dvdscreener)\b`)
-	r5Regex  = regexp.MustCompile(`(?i)\b(?:r5|r6|r5line|r5.line|line.audio|ac3md|ac3ld|line.dub)\b`)
+	scrRegex = regexp.MustCompile(`(?i)\b(?:scr|screener|dvdscr|bdscr|dvd-?scr|ddc|dvdscreener|pre[-_ ]?dvd(?:rip)?|predvd(?:rip)?)\b`)
+	r5Regex  = regexp.MustCompile(`(?i)\b(?:r5|r6|r5line|r5.line|line.audio|ac3md|ac3ld|line.dub|hq[-_ ]?rip|hq[-_ ]?hdrip|hqrip)\b`)
 )
 
 func DetectLowQuality(title string) string {
@@ -707,6 +708,12 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 				}
 			}
 		}
+	}
+
+	// Positive Curation Hook: Match the title against early theatrical leak indicators
+	// to dynamically override the quality output parameter before committing to memory cache
+	if lowQual := DetectLowQuality(title); lowQual != "" {
+		result.Quality = lowQual
 	}
 
 	parseCacheMu.Lock()
