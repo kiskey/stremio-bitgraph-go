@@ -1,7 +1,4 @@
 
-### **`README.md`**
-
-```markdown
 # GoMagnet (Bitgraph Go)
 
 A high-performance, lightweight Go port of `stremio-bitgraph` (the `bitgraph2.0` architecture). This self-hosted Stremio addon bridges your private **Bitmagnet** indexer with premium debrid providers (**Real-Debrid** and **TorBox**) and native **P2P Torrent Streaming** to deliver instant movie and TV show playback.
@@ -24,6 +21,9 @@ PostgreSQL database requirements have been fully replaced. SQLite is configured 
 - **Auto-Maintenance**: An automated background loop runs daily to prune stale, inactive cache entries based on a configurable inactivity threshold.
 - **Atomic Operations**: Safe, ACID-compliant local transactions with auto-healing locks.
 
+### 🛡️ Bayesian Anime Shield & Air-Date Cadence Profiler
+Features a highly advanced, fully automated, metadata-driven TV and Anime filtering pipeline. It utilizes native TMDB TV genre classifications combined with an on-the-fly mathematical air-date cadence analyzer to auto-detect daily broadcast formats without relying on brittle text keyword configurations.
+
 ---
 
 ## 🛠️ Environment Variables Config (`.env`)
@@ -38,6 +38,7 @@ Create a `.env` file in the root of your project using the following parameters:
 | `DATABASE_URL` | No | `./bitgraph.db` | Local SQLite database file path. |
 | `DATABASE_CLEANUP_DAYS` | No | `30` | Inactivity days before cached torrents are auto-pruned. |
 | `BITMAGNET_GRAPHQL_ENDPOINT` | Yes | - | GraphQL API endpoint of your Bitmagnet instance. |
+| `BITMAGNET_LIMIT` | No | `250` | GQL search limit threshold passed to Bitmagnet to prevent FTS saturation. |
 | `TMDB_API_KEY` | Yes | - | TMDB API Key used for primary title lookup. |
 | `OMDB_API_KEY` | No | - | Fallback metadata API key (Tier 2 fallback). |
 | `TRAKT_CLIENT_ID` | No | - | Fallback metadata client ID (Tier 2 fallback). |
@@ -50,7 +51,6 @@ Create a `.env` file in the root of your project using the following parameters:
 | `STRICT_LANGUAGE_FILTER` | No | `false` | If `true`, non-preferred languages will be dropped entirely. |
 | `SIMILARITY_THRESHOLD` | No | `0.75` | Minimum matching threshold (0.0 to 1.0) between movie and file name. |
 | `STREAM_LIMIT_PER_QUALITY` | No | `2` | Number of returned streams per quality category (4K, 1080p, etc.). |
-| `NEGATE_KEYWORDS` | No | - | Comma-separated list of keywords to negate server-side via Bitmagnet FTS. |
 
 ---
 
@@ -77,6 +77,7 @@ services:
       - DATABASE_URL=/data/bitgraph.db
       - DATABASE_CLEANUP_DAYS=30
       - BITMAGNET_GRAPHQL_ENDPOINT=http://bitmagnet:3333/graphql
+      - BITMAGNET_LIMIT=250
       - TMDB_API_KEY=your_tmdb_key_here
       - DEBRID_SERVICE=realdebrid
       - REALDEBRID_API_KEY=your_rd_api_key_here
@@ -88,7 +89,7 @@ services:
 
 ---
 
-## 🏔️ Running on Alpine Linux as a Service (OpenRC)
+## Running on Alpine Linux as a Service (OpenRC)
 
 Follow these step-by-step instructions to deploy and manage your compiled static binary natively as a daemon on Alpine Linux.
 
@@ -218,6 +219,10 @@ DEBRID_CACHE_TABLE=debrid_cache
 # GraphQL API endpoint of your Bitmagnet instance.
 BITMAGNET_GRAPHQL_ENDPOINT=http://bitmagnet:3333/graphql
 
+# GQL search limit threshold passed to Bitmagnet to prevent FTS saturation.
+# Default: 250
+BITMAGNET_LIMIT=250
+
 
 # ── 4. METADATA PROVIDERS CONFIGURATION ──────────────────────────────────────
 # Primary TMDB (TheMovieDB) API Key used for title lookup (Required).
@@ -261,10 +266,6 @@ SIMILARITY_THRESHOLD=0.75
 # Number of returned streams per quality category (4K, 1080p, 720p, SD).
 # Default: 2.
 STREAM_LIMIT_PER_QUALITY=2
-
-# Comma-separated list of keywords to negate server-side via Bitmagnet FTS.
-# Recommended: 3D,CAM,Screener,TS,TC,zip,rar,iso,exe
-NEGATE_KEYWORDS=3D,CAM,Screener,TS,TC,zip,rar,iso,exe
 ```
 
 Save and exit.
@@ -299,7 +300,3 @@ If your workflow incorporates private repositories (such as `github.com/ovrlord-
 3. Create a secret named **`GH_PAT`** and paste your token.
 4. Push a tag (e.g., `git tag v2.0.0 && git push origin v2.0.0`) to trigger the compilation and release automatically.
 ```
-```
----
-
-
