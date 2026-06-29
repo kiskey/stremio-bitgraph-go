@@ -30,6 +30,7 @@ type Stream struct {
 	Quality     string
 	Size        int64
 	IsCached    bool
+	Badges      string // Pre-computed badges to eliminate real-time regex latency
 }
 
 // Static Low-Entropy Grammatical Stop Words Set for PN-SILEC Filtering
@@ -510,13 +511,6 @@ func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) boo
 	return true
 }
 
-func getHomoglyphRepresentations(r rune) []rune {
-	if classes, ok := homoglyphClasses[r]; ok {
-		return classes
-	}
-	return []rune{r}
-}
-
 var uint64MapPool = sync.Pool{
 	New: func() interface{} {
 		return make(map[uint64]struct{}, 64)
@@ -558,12 +552,27 @@ func OverlapCoefficient(s1, s2 string) float64 {
 			hasLast = true
 			continue
 		}
-		repsA := getHomoglyphRepresentations(lastRune)
-		repsB := getHomoglyphRepresentations(r)
-		for _, charA := range repsA {
+		repsA, okA := homoglyphClasses[lastRune]
+		repsB, okB := homoglyphClasses[r]
+		if !okA && !okB {
+			packed := (uint64(lastRune) << 32) | uint64(r)
+			bg1[packed] = struct{}{}
+		} else if !okA && okB {
 			for _, charB := range repsB {
-				packed := (uint64(charA) << 32) | uint64(charB)
+				packed := (uint64(lastRune) << 32) | uint64(charB)
 				bg1[packed] = struct{}{}
+			}
+		} else if okA && !okB {
+			for _, charA := range repsA {
+				packed := (uint64(charA) << 32) | uint64(r)
+				bg1[packed] = struct{}{}
+			}
+		} else {
+			for _, charA := range repsA {
+				for _, charB := range repsB {
+					packed := (uint64(charA) << 32) | uint64(charB)
+					bg1[packed] = struct{}{}
+				}
 			}
 		}
 		lastRune = r
@@ -577,15 +586,45 @@ func OverlapCoefficient(s1, s2 string) float64 {
 			hasLast = true
 			continue
 		}
-		repsA := getHomoglyphRepresentations(lastRune)
-		repsB := getHomoglyphRepresentations(r)
-		for _, charA := range repsA {
+		repsA, okA := homoglyphClasses[lastRune]
+		repsB, okB := homoglyphClasses[r]
+		if !okA && !okB {
+			packed := (uint64(lastRune) << 32) | uint64(r)
+			if _, ok := bg2[packed]; !ok {
+				bg2[packed] = struct{}{}
+				if _, exists := bg1[packed]; exists {
+					intersection++
+				}
+			}
+		} else if !okA && okB {
 			for _, charB := range repsB {
-				packed := (uint64(charA) << 32) | uint64(charB)
+				packed := (uint64(lastRune) << 32) | uint64(charB)
 				if _, ok := bg2[packed]; !ok {
 					bg2[packed] = struct{}{}
 					if _, exists := bg1[packed]; exists {
 						intersection++
+					}
+				}
+			}
+		} else if okA && !okB {
+			for _, charA := range repsA {
+				packed := (uint64(charA) << 32) | uint64(r)
+				if _, ok := bg2[packed]; !ok {
+					bg2[packed] = struct{}{}
+					if _, exists := bg1[packed]; exists {
+						intersection++
+					}
+				}
+			}
+		} else {
+			for _, charA := range repsA {
+				for _, charB := range repsB {
+					packed := (uint64(charA) << 32) | uint64(charB)
+					if _, ok := bg2[packed]; !ok {
+						bg2[packed] = struct{}{}
+						if _, exists := bg1[packed]; exists {
+							intersection++
+						}
 					}
 				}
 			}
@@ -728,6 +767,10 @@ func sequelGuardrail(targetTitle, parsedTitle string, score float64) float64 {
 	cleanTarget = normalizeNumbersInTitle(cleanTarget)
 	cleanParsed = normalizeNumbersInTitle(cleanParsed)
 
+	return sequelGuardrailParsed(cleanTarget, cleanParsed, score)
+}
+
+func sequelGuardrailParsed(cleanTarget, cleanParsed string, score float64) float64 {
 	targetNoArt := stripLeadingArticles(cleanTarget)
 	parsedNoArt := stripLeadingArticles(cleanParsed)
 
@@ -778,17 +821,13 @@ func sequelGuardrail(targetTitle, parsedTitle string, score float64) float64 {
 	return score
 }
 
-func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
-	if tmdbTitle == "" {
-		return 0
-	}
-	parsed := parser.RobustParseInfo(torrentName, 0)
-	if parsed.Title == "" {
+func getTitleSimilarityParsed(tmdbTitle, parsedTitle string) float64 {
+	if tmdbTitle == "" || parsedTitle == "" {
 		return 0
 	}
 
 	cleanTmdb := strings.Trim(strings.ToLower(tmdbTitle), " .-_[]()/\\")
-	cleanParsed := strings.Trim(strings.ToLower(parsed.Title), " .-_[]()/\\")
+	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
 
 	cleanTmdb = ExpandAbbreviations(cleanTmdb)
 	cleanParsed = ExpandAbbreviations(cleanParsed)
@@ -816,9 +855,17 @@ func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
 		}
 	}
 
-	oc = sequelGuardrail(tmdbTitle, parsed.Title, oc)
+	oc = sequelGuardrailParsed(cleanTmdb, cleanParsed, oc)
 
 	return oc
+}
+
+func getTitleSimilarity(tmdbTitle, torrentName string) float64 {
+	if tmdbTitle == "" {
+		return 0
+	}
+	parsed := parser.RobustParseInfo(torrentName, 0)
+	return getTitleSimilarityParsed(tmdbTitle, parsed.Title)
 }
 
 // stripDiacritics maps standard Latin-1 and advanced unicode diacritics to ASCII base characters
@@ -909,7 +956,7 @@ func fetchTorrentFilesConcurrent(ctx context.Context, torrents []bitmagnet.Torre
 	sem := semaphore.NewWeighted(6)
 
 	for _, t := range torrents {
-		if !t.Torrent.HasFilesInfo {
+		if !t.Torrent.HasFilesInfo && t.Torrent.FilesStatus != "multi" {
 			continue
 		}
 		t := t
@@ -983,6 +1030,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 						Quality:     quality,
 						Size:        size,
 						IsCached:    true,
+						Badges:      parser.FormatBadges(fn),
 					})
 				}
 			}
@@ -1001,7 +1049,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 		if cachedHashes[torrent.InfoHash] {
 			continue
 		}
-		if torrent.Torrent.HasFilesInfo {
+		if torrent.Torrent.HasFilesInfo || torrent.Torrent.FilesStatus == "multi" {
 			multiFileTorrents = append(multiFileTorrents, torrent)
 		}
 	}
@@ -1059,14 +1107,16 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 				}
 			}
 
+			parsed := parser.RobustParseInfo(td.Name, 0)
+
 			// Find the title (primary or alternate) that actually matched
 			matchingTitle := ""
-			bestSim := getTitleSimilarity(tmdbShow.Title, td.Name)
+			bestSim := getTitleSimilarityParsed(tmdbShow.Title, parsed.Title)
 			if bestSim >= config.SimilarityThreshold {
 				matchingTitle = tmdbShow.Title
 			}
 			for _, alt := range altTitles {
-				if s := getTitleSimilarity(alt, td.Name); s > bestSim {
+				if s := getTitleSimilarityParsed(alt, parsed.Title); s > bestSim {
 					bestSim = s
 					if s >= config.SimilarityThreshold {
 						matchingTitle = alt
@@ -1085,7 +1135,6 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 			}
 
 			// SPEBC: Block older remakes by checking if the torrent year is older than the premiere year
-			parsed := parser.RobustParseInfo(td.Name, 0)
 			if !isLongRunning && parsed.Year != 0 && tmdbShow.PublishedAt != "" {
 				premiereY, err := strconv.Atoi(tmdbShow.PublishedAt)
 				if err == nil {
@@ -1168,6 +1217,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 							Quality:     quality,
 							Size:        td.Size,
 							IsCached:    false,
+							Badges:      parser.FormatBadges(td.Name),
 						})
 					} else {
 						utils.Logger.Debug("filtering out series torrent: files found, but none matched requested season/episode", "name", td.Name, "season", season, "episode", episode)
@@ -1209,6 +1259,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 							Quality:     quality,
 							Size:        td.Size,
 							IsCached:    false,
+							Badges:      parser.FormatBadges(td.Name),
 						})
 					} else {
 						utils.Logger.Debug("filtering out series torrent: fallback failed (no season pack or episode match)", 
@@ -1279,6 +1330,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 					Quality:     quality,
 					Size:        size,
 					IsCached:    true,
+					Badges:      parser.FormatBadges(fn),
 				})
 			}
 		}
@@ -1296,7 +1348,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 		if cachedHashes[torrent.InfoHash] {
 			continue
 		}
-		if torrent.Torrent.HasFilesInfo {
+		if torrent.Torrent.HasFilesInfo || torrent.Torrent.FilesStatus == "multi" {
 			multiFileTorrents = append(multiFileTorrents, torrent)
 		}
 	}
@@ -1352,14 +1404,16 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				}
 			}
 
+			parsed := parser.RobustParseInfo(td.Name, 0)
+
 			// Find the title (primary or alternate) that actually matched
 			matchingTitle := ""
-			bestSim := getTitleSimilarity(tmdbMovie.Title, td.Name)
+			bestSim := getTitleSimilarityParsed(tmdbMovie.Title, parsed.Title)
 			if bestSim >= config.SimilarityThreshold {
 				matchingTitle = tmdbMovie.Title
 			}
 			for _, alt := range altTitles {
-				if s := getTitleSimilarity(alt, td.Name); s > bestSim {
+				if s := getTitleSimilarityParsed(alt, parsed.Title); s > bestSim {
 					bestSim = s
 					if s >= config.SimilarityThreshold {
 						matchingTitle = alt
@@ -1375,8 +1429,6 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 					"tmdb_title", tmdbMovie.Title)
 				return nil
 			}
-
-			parsed := parser.RobustParseInfo(td.Name, 0)
 
 			// Type-Leakage Prevention: TV Series episodes/packs must never match as movie streams
 			if parsed.Season != 0 || parsed.Episode != 0 || parsed.IsPack {
@@ -1404,7 +1456,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				return nil
 			}
 
-			if td.HasFilesInfo {
+			if td.HasFilesInfo || td.FilesStatus == "multi" {
 				files, ok := filesMap[t.InfoHash]
 				if ok && len(files) > 0 {
 					hasVideo := false
@@ -1451,6 +1503,7 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				Quality:     quality,
 				Size:        td.Size,
 				IsCached:    false,
+				Badges:      parser.FormatBadges(td.Name),
 			}}}
 			return nil
 		})
