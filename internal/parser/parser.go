@@ -103,7 +103,10 @@ var seasonFolderRegex = regexp.MustCompile(`(?i)\b(?:s|season|series)\s*0*(\d+)\
 
 // Pre-compiled regexes for RobustParseInfo safety fallback
 var sxeRegex = regexp.MustCompile(`(?i)\bS(\d+)\s*E(\d+)\b`)
-var crossRegex = regexp.MustCompile(`(?i)\b(\d+)\s*x\s*(\d+)\b`)
+
+// Restrict crossRegex to 1-2 digit seasons and 2-4 digit episodes to prevent Year-Codec / Resolution-Codec collisions
+var crossRegex = regexp.MustCompile(`(?i)\b([0-9]{1,2})\s*x\s*([0-9]{2,4})\b`)
+
 var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to)\s*0*(\d+)\b`)
 
 // Regional patterns for TamilMV/TamilBlasters indexer formats
@@ -119,6 +122,9 @@ var websitePrefixRegex = regexp.MustCompile(`(?i)(?:^|[\s_.-]*)(?:(?:www\d*\.)[a
 
 // Match common decimal channel audio configurations (e.g. 5.1, 7.1, 2.0) to prevent TV show misclassifications
 var audioChannelsRegex = regexp.MustCompile(`(?i)\b([1-9])\.([0-9])\b`)
+
+// Match standalone resolution numbers without trailing 'p' (e.g. 1080, 720, 2160) to prevent S10E80 parsing splits
+var resolutionNoPRegex = regexp.MustCompile(`\b(2160|1080|720|480|360)\b`)
 
 // Conjoined metadata regexes with strict lower-bounds of 3 characters to prevent short-word collisions (e.g. Scratch1080p, Scratchx264, S01WEBRip)
 var conjoinedQualityRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
@@ -477,6 +483,9 @@ func SanitizeName(name string) string {
 	// Strip Radarr/Sonarr-style Website Prefix Domains (e.g. www.1TamilMV.yt - or [TamilBlasters.gripe] ) before parsing
 	s := websitePrefixRegex.ReplaceAllString(name, "")
 
+	// Normalize standalone resolutions to include 'p' (e.g., 1080 -> 1080p) to prevent TV parser misclassifying them as S10E80
+	s = resolutionNoPRegex.ReplaceAllString(s, "${1}p")
+
 	// Replace audio channels like 5.1, 7.1, 2.0 with 5ch, 7ch, 2ch to prevent dot replacement from tokenizing them as series season/episode numbers (e.g. 5 1)
 	s = audioChannelsRegex.ReplaceAllString(s, "${1}ch")
 
@@ -648,7 +657,6 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 				parsedTitle = strings.TrimSpace(clean[:match[0]])
 				found = true
 			} else if match := crossRegex.FindStringSubmatchIndex(clean); len(match) >= 6 {
-				// 4. Try to find standard XXxXX pattern
 				season, _ = strconv.Atoi(clean[match[2]:match[3]])
 				episode, _ = strconv.Atoi(clean[match[4]:match[5]])
 				parsedTitle = strings.TrimSpace(clean[:match[0]])
