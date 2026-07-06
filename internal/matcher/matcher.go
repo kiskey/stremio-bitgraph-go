@@ -1471,7 +1471,16 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 					}
 				}
 
-				if !isAudioFakeSeries {
+				// Guardrail 2: If Season parses to >= 90 in movie mode (representing custom encoder presets like S90/S91 Joy Releases),
+				// clear TV indicators and bypass series rejection.
+				isEncoderFakeSeries := false
+				if parsed.Season >= 90 {
+					parsed.Season = 0
+					parsed.IsPack = false
+					isEncoderFakeSeries = true
+				}
+
+				if !isAudioFakeSeries && !isEncoderFakeSeries {
 					utils.Logger.Debug("filtering out movie torrent: contains TV series indicators", "name", td.Name, "season", parsed.Season, "episode", parsed.Episode, "is_pack", parsed.IsPack)
 					return nil
 				}
