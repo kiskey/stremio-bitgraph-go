@@ -164,6 +164,23 @@ var abbreviationMap = map[string][]string{
 	"ft":   {"feat", "featuring"},
 }
 
+// standardizePunctuation normalizes non-standard middle dots, curly quotes, and dashes to standard ASCII representations
+func standardizePunctuation(s string) string {
+	r := strings.NewReplacer(
+		"·", " ",
+		"•", " ",
+		"’", "'",
+		"‘", "'",
+		"´", "'",
+		"`", "'",
+		"“", "\"",
+		"”", "\"",
+		"—", "-",
+		"–", "-",
+	)
+	return r.Replace(s)
+}
+
 func ExpandAbbreviations(title string) string {
 	words := strings.Fields(strings.ToLower(title))
 	for i, w := range words {
@@ -381,8 +398,11 @@ func isTechnicalToken(s string) bool {
 // unrelated multi-word torrents (e.g. "Upgraded", "Italian"). It allows metadata
 // words (codecs, quality tags, languages) to pass through.
 func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) bool {
-	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
-	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
+	stdTarget := standardizePunctuation(targetTitle)
+	stdParsed := standardizePunctuation(parsedTitle)
+
+	cleanTarget := strings.Trim(strings.ToLower(stdTarget), " .-_[]()/\\")
+	cleanParsed := strings.Trim(strings.ToLower(stdParsed), " .-_[]()/\\")
 
 	// Temporarily replace hyphens with standard spaces to handle dash-joined titles
 	// like "From-Scratch" matching "From Scratch" cleanly.
@@ -410,7 +430,8 @@ func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) boo
 		targetWordSet[cleanWord(w)] = true
 	}
 	for _, alt := range altTitles {
-		cleanAlt := strings.Trim(strings.ToLower(alt), " .-_[]()/\\")
+		stdAlt := standardizePunctuation(alt)
+		cleanAlt := strings.Trim(strings.ToLower(stdAlt), " .-_[]()/\\")
 		cleanAlt = strings.ReplaceAll(cleanAlt, "-", " ")
 		altNoArt := stripLeadingArticles(cleanAlt)
 		for _, w := range strings.Fields(altNoArt) {
@@ -826,8 +847,13 @@ func getTitleSimilarityParsed(tmdbTitle, parsedTitle string) float64 {
 		return 0
 	}
 
-	cleanTmdb := strings.Trim(strings.ToLower(tmdbTitle), " .-_[]()/\\")
-	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
+	// Apply robust punctuation standardization to eliminate unicode middle dots, 
+	// curly apostrophes, and non-standard hyphens prior to evaluation.
+	stdTmdb := standardizePunctuation(tmdbTitle)
+	stdParsed := standardizePunctuation(parsedTitle)
+
+	cleanTmdb := strings.Trim(strings.ToLower(stdTmdb), " .-_[]()/\\")
+	cleanParsed := strings.Trim(strings.ToLower(stdParsed), " .-_[]()/\\")
 
 	cleanTmdb = ExpandAbbreviations(cleanTmdb)
 	cleanParsed = ExpandAbbreviations(cleanParsed)
