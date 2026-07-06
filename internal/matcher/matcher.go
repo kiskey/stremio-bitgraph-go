@@ -277,10 +277,6 @@ func isBlockedArchive(name string) bool {
 		strings.HasSuffix(lower, ".gz")
 }
 
-func isAlphaNum(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-}
-
 func containsNonASCII(s string) bool {
 	for _, r := range s {
 		if r > 127 {
@@ -1480,7 +1476,17 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 					isEncoderFakeSeries = true
 				}
 
-				if !isAudioFakeSeries && !isEncoderFakeSeries {
+				// Guardrail 3: If Episode parses to >= 100 in movie mode (representing codec collisions
+				// like x264 -> Episode 264 or x265 -> Episode 265), clear TV indicators and bypass series rejection.
+				isCodecFakeSeries := false
+				if parsed.Episode == 264 || parsed.Episode == 265 || parsed.Episode >= 100 {
+					parsed.Season = 0
+					parsed.Episode = 0
+					parsed.IsPack = false
+					isCodecFakeSeries = true
+				}
+
+				if !isAudioFakeSeries && !isEncoderFakeSeries && !isCodecFakeSeries {
 					utils.Logger.Debug("filtering out movie torrent: contains TV series indicators", "name", td.Name, "season", parsed.Season, "episode", parsed.Episode, "is_pack", parsed.IsPack)
 					return nil
 				}
