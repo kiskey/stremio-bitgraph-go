@@ -145,7 +145,6 @@ var ignoredNumbers = map[string]bool{
 	"576": true, "264": true, "265": true, "10": true, "8": true,
 }
 
-// Refined seasonRangeRegex to optionally support redundant second season prefixes (e.g. S01-S21, Season 1 to Season 2)
 var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to|~)\s*(?:s|season|seasons)?\s*0*(\d+)\b`)
 
 // Self-Learning Entropy Engine Global State Variables
@@ -1240,7 +1239,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 							})
 						}
 					}
-					if bestFile, found := parser.FindBestSeriesFileLongRunning(candidates, season, episode, parsed.Season, airDate); found {
+					if bestFile, found := parser.FindBestSeriesFileLongRunning(candidates, season, episode, parsed.Season, airDate, prior.IsAnimation); found {
 						local = append(local, Stream{
 							InfoHash:    t.InfoHash,
 							FileIndex:   bestFile.ID,
