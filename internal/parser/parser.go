@@ -107,7 +107,8 @@ var sxeRegex = regexp.MustCompile(`(?i)\bS(\d+)\s*E(\d+)\b`)
 // Restrict crossRegex to 1-2 digit seasons and 2-4 digit episodes to prevent Year-Codec / Resolution-Codec collisions
 var crossRegex = regexp.MustCompile(`(?i)\b([0-9]{1,2})\s*x\s*([0-9]{2,4})\b`)
 
-var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to)\s*0*(\d+)\b`)
+// Refined seasonRangeRegex to optionally support redundant second season prefixes (e.g. S01-S21, Season 1 to Season 2)
+var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to|~)\s*(?:s|season|seasons)?\s*0*(\d+)\b`)
 
 // Regional patterns for TamilMV/TamilBlasters indexer formats
 var regionalRangeRegex = regexp.MustCompile(`(?i)\b(?:season|s|series)\s*(\d+)\s*(?:ep|episode|e)?\s*[\(\[]?\s*(\d+)\s*(?:-|to)\s*(\d+)\s*[\)\]]?\b`)
@@ -829,11 +830,20 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 	}
 
 	parts := strings.Split(airDate, "-")
-	var dotAirDate, dashAirDate, spaceAirDate string
+	var permutations []string
 	if len(parts) == 3 {
-		dotAirDate = fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
-		dashAirDate = airDate
-		spaceAirDate = fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
+		y, m, d := parts[0], parts[1], parts[2]
+		permutations = []string{
+			fmt.Sprintf("%s.%s.%s", y, m, d),
+			fmt.Sprintf("%s-%s-%s", y, m, d),
+			fmt.Sprintf("%s %s %s", y, m, d),
+			fmt.Sprintf("%s.%s.%s", m, d, y),
+			fmt.Sprintf("%s-%s-%s", m, d, y),
+			fmt.Sprintf("%s %s %s", m, d, y),
+			fmt.Sprintf("%s.%s.%s", d, m, y),
+			fmt.Sprintf("%s-%s-%s", d, m, y),
+			fmt.Sprintf("%s %s %s", d, m, y),
+		}
 	}
 
 	// 1. Direct, Date, and Range-based Scanning with Size-weighting
@@ -847,10 +857,11 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 
 		// Check absolute air date match first for daily/long-running shows
 		if len(parts) == 3 {
-			if strings.Contains(lowerPath, dotAirDate) ||
-				strings.Contains(lowerPath, dashAirDate) ||
-				strings.Contains(lowerPath, spaceAirDate) {
-				matched = true
+			for _, perm := range permutations {
+				if strings.Contains(lowerPath, perm) {
+					matched = true
+					break
+				}
 			}
 		}
 
