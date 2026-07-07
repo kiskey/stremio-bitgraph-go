@@ -1203,14 +1203,24 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 			} else if isLongRunning && airDate != "" {
 				parts := strings.Split(airDate, "-")
 				if len(parts) == 3 {
-					dotAirDate := fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
-					dashAirDate := airDate
-					spaceAirDate := fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
+					y, m, d := parts[0], parts[1], parts[2]
+					permutations := []string{
+						fmt.Sprintf("%s.%s.%s", y, m, d),
+						fmt.Sprintf("%s-%s-%s", y, m, d),
+						fmt.Sprintf("%s %s %s", y, m, d),
+						fmt.Sprintf("%s.%s.%s", m, d, y),
+						fmt.Sprintf("%s-%s-%s", m, d, y),
+						fmt.Sprintf("%s %s %s", m, d, y),
+						fmt.Sprintf("%s.%s.%s", d, m, y),
+						fmt.Sprintf("%s-%s-%s", d, m, y),
+						fmt.Sprintf("%s %s %s", d, m, y),
+					}
 					lowerName := strings.ToLower(td.Name)
-					if strings.Contains(lowerName, dotAirDate) || 
-					   strings.Contains(lowerName, dashAirDate) || 
-					   strings.Contains(lowerName, spaceAirDate) {
-						matchedSeasonEpisodeOrDate = true
+					for _, perm := range permutations {
+						if strings.Contains(lowerName, perm) {
+							matchedSeasonEpisodeOrDate = true
+							break
+						}
 					}
 				}
 			}
@@ -1260,14 +1270,24 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 					if !matched && isLongRunning && airDate != "" {
 						parts := strings.Split(airDate, "-")
 						if len(parts) == 3 {
-							dotAirDate := fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
-							dashAirDate := airDate
-							spaceAirDate := fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
+							y, m, d := parts[0], parts[1], parts[2]
+							permutations := []string{
+								fmt.Sprintf("%s.%s.%s", y, m, d),
+								fmt.Sprintf("%s-%s-%s", y, m, d),
+								fmt.Sprintf("%s %s %s", y, m, d),
+								fmt.Sprintf("%s.%s.%s", m, d, y),
+								fmt.Sprintf("%s-%s-%s", m, d, y),
+								fmt.Sprintf("%s %s %s", m, d, y),
+								fmt.Sprintf("%s.%s.%s", d, m, y),
+								fmt.Sprintf("%s-%s-%s", d, m, y),
+								fmt.Sprintf("%s %s %s", d, m, y),
+							}
 							lowerName := strings.ToLower(td.Name)
-							if strings.Contains(lowerName, dotAirDate) || 
-							   strings.Contains(lowerName, dashAirDate) || 
-							   strings.Contains(lowerName, spaceAirDate) {
-								matched = true
+							for _, perm := range permutations {
+								if strings.Contains(lowerName, perm) {
+									matched = true
+									break
+								}
 							}
 						}
 					}
