@@ -16,6 +16,7 @@ import (
 	"github.com/user/stremio-bitgraph-go/internal/db"
 	"github.com/user/stremio-bitgraph-go/internal/debrid"
 	"github.com/user/stremio-bitgraph-go/internal/matcher"
+	"github.com/user/stremio-bitgraph-go/internal/metadata"
 	"github.com/user/stremio-bitgraph-go/internal/parser"
 	"github.com/user/stremio-bitgraph-go/internal/utils"
 )
@@ -94,6 +95,13 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, urlStr, http.StatusFound)
 			return
 		}
+	}
+
+	// Dynamic Metadata Context Propagation Layer (Sub-microsecond memory-cache lookup)
+	meta, err := metadata.GetMetaDetails(ctx, imdbID, typ)
+	isAnimation := false
+	if err == nil && meta != nil {
+		isAnimation = meta.IsAnimation
 	}
 
 	var torrentInfo *debrid.TorrentInfo
@@ -343,7 +351,7 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 				 DO UPDATE SET torrent_info_json = EXCLUDED.torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
 				infoHash, imdbID, typ, config.DebridProvider, string(torrentJSON), lang, utils.GetQuality(readyTorrent.Filename), readyTorrent.Seeders)
 
-			url, err := resolveDownloadURL(ctx, provider, readyTorrent, typ, season, episode)
+			url, err := resolveDownloadURL(ctx, provider, readyTorrent, typ, season, episode, isAnimation)
 			if err != nil {
 				processErr = err
 				return
@@ -365,7 +373,7 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url, err := resolveDownloadURL(ctx, provider, torrentInfo, typ, season, episode)
+	url, err := resolveDownloadURL(ctx, provider, torrentInfo, typ, season, episode, isAnimation)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -380,7 +388,7 @@ func streamResolveHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
-func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentInfo *debrid.TorrentInfo, typ, season, episode string) (string, error) {
+func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentInfo *debrid.TorrentInfo, typ, season, episode string, isAnimation bool) (string, error) {
 	if typ == "series" {
 		parsed := parser.RobustParseInfo(torrentInfo.Filename, 0)
 		fallbackSeason := parsed.Season
@@ -415,7 +423,7 @@ func resolveDownloadURL(ctx context.Context, provider debrid.Provider, torrentIn
 		}
 
 		var targetFile *debrid.FileInfo
-		if bestFile, found := parser.FindBestSeriesFile(candidates, sVal, eVal, fallbackSeason); found {
+		if bestFile, found := parser.FindBestSeriesFile(candidates, sVal, eVal, fallbackSeason, isAnimation); found {
 			for _, f := range selectedVideoFiles {
 				if f.ID == bestFile.ID {
 					targetFile = &f
