@@ -43,6 +43,7 @@ var languageToISO = map[rtp.Language]string{
 	rtp.LanguageGerman:        "de",
 	rtp.LanguageFrench:        "fr",
 	rtp.LanguageItalian:       "it",
+	rtp.LanguageUniversal:     "en", // Map universal to english as a safe fallback
 	rtp.LanguageRussian:       "ru",
 	rtp.LanguageJapanese:      "ja",
 	rtp.LanguageChinese:       "zh",
@@ -816,10 +817,6 @@ func isDecimalDot(s string, i int) bool {
 	left := s[i-1]
 	right := s[i+1]
 	return left >= '0' && left <= '9' && right >= '0' && right <= '9'
-}
-
-func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, isAnimation bool) (CandidateFile, bool) {
-	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "", isAnimation)
 }
 
 func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, airDate string, isAnimation bool) (CandidateFile, bool) {
