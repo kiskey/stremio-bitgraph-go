@@ -314,6 +314,16 @@ func MatchRange(path string, targetEpisode int) bool {
 	matches := rangeRegex.FindAllStringSubmatchIndex(fileName, -1)
 	for _, match := range matches {
 		if len(match) >= 6 {
+			matchStart := match[0]
+			precedingStart := matchStart - 8
+			if precedingStart < 0 {
+				precedingStart = 0
+			}
+			contextPrefix := strings.ToLower(fileName[precedingStart:matchStart])
+			if strings.Contains(contextPrefix, "season") || strings.Contains(contextPrefix, "seasons") || strings.HasSuffix(strings.TrimSpace(contextPrefix), "s") {
+				continue // Skip season range matches inside absolute episode evaluations
+			}
+
 			startNumStart := match[2]
 			startNumEnd := match[3]
 			endNumStart := match[4]
@@ -485,17 +495,17 @@ func getQuality(res int) string {
 }
 
 func SanitizeName(name string) string {
+	// Strip leading release-group brackets (e.g., [uP] or [df68] or [AnimeRG]) at the very start of the string
+	s := leadingGroupBracketRe.ReplaceAllString(name, "")
+
 	// Strip Radarr/Sonarr-style Website Prefix Domains (e.g. www.1TamilMV.yt - or [TamilBlasters.gripe] ) before parsing
-	s := websitePrefixRegex.ReplaceAllString(name, "")
+	s = websitePrefixRegex.ReplaceAllString(s, "")
 
 	// Normalize standalone resolutions to include 'p' (e.g., 1080 -> 1080p) to prevent TV parser misclassifying them as S10E80
 	s = resolutionNoPRegex.ReplaceAllString(s, "${1}p")
 
 	// Replace audio channels like 5.1, 7.1, 2.0 with 5ch, 7ch, 2ch to prevent dot replacement from tokenizing them as series season/episode numbers (e.g. 5 1)
 	s = audioChannelsRegex.ReplaceAllString(s, "${1}ch")
-
-	// Strip leading release-group brackets (e.g., [uP] or [df68] or [AnimeRG]) at the very start of the string
-	s = leadingGroupBracketRe.ReplaceAllString(s, "")
 
 	// Insert spaces before conjoined technical keywords to prevent unified word tokenization failures (e.g. Scratch1080p -> Scratch 1080p)
 	s = conjoinedQualityRegex.ReplaceAllString(s, "$1 $2")
