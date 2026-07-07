@@ -320,8 +320,25 @@ func MatchRange(path string, targetEpisode int) bool {
 				precedingStart = 0
 			}
 			contextPrefix := strings.ToLower(fileName[precedingStart:matchStart])
-			if strings.Contains(contextPrefix, "season") || strings.Contains(contextPrefix, "seasons") || strings.HasSuffix(strings.TrimSpace(contextPrefix), "s") {
-				continue // Skip season range matches inside absolute episode evaluations
+			trimmedPrefix := strings.TrimRight(contextPrefix, " .-_[]()/\\")
+
+			isSeasonPrefix := false
+			if strings.Contains(trimmedPrefix, "season") || strings.Contains(trimmedPrefix, "seasons") {
+				isSeasonPrefix = true
+			} else if strings.HasSuffix(trimmedPrefix, "s") {
+				sIdx := strings.LastIndex(trimmedPrefix, "s")
+				if sIdx == 0 {
+					isSeasonPrefix = true
+				} else if sIdx > 0 {
+					prevChar := trimmedPrefix[sIdx-1]
+					if (prevChar < 'a' || prevChar > 'z') && (prevChar < '0' || prevChar > '9') {
+						isSeasonPrefix = true
+					}
+				}
+			}
+
+			if isSeasonPrefix {
+				continue // Ignore season range matches inside absolute episode evaluations
 			}
 
 			startNumStart := match[2]
@@ -937,7 +954,6 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 							if err == nil && sNum != targetSeason {
 								isDifferentSeason = true
 								break
-							}
 						}
 					}
 					if !isDifferentSeason {
@@ -1070,6 +1086,33 @@ func HasExcludingRange(name string, targetEpisode int) bool {
 	matches := rangeRegex.FindAllStringSubmatchIndex(name, -1)
 	for _, match := range matches {
 		if len(match) >= 6 {
+			matchStart := match[0]
+			precedingStart := matchStart - 8
+			if precedingStart < 0 {
+				precedingStart = 0
+			}
+			contextPrefix := strings.ToLower(name[precedingStart:matchStart])
+			trimmedPrefix := strings.TrimRight(contextPrefix, " .-_[]()/\\")
+
+			isSeasonPrefix := false
+			if strings.Contains(trimmedPrefix, "season") || strings.Contains(trimmedPrefix, "seasons") {
+				isSeasonPrefix = true
+			} else if strings.HasSuffix(trimmedPrefix, "s") {
+				sIdx := strings.LastIndex(trimmedPrefix, "s")
+				if sIdx == 0 {
+					isSeasonPrefix = true
+				} else if sIdx > 0 {
+					prevChar := trimmedPrefix[sIdx-1]
+					if (prevChar < 'a' || prevChar > 'z') && (prevChar < '0' || prevChar > '9') {
+						isSeasonPrefix = true
+					}
+				}
+			}
+
+			if isSeasonPrefix {
+				continue // Ignore season range matches
+			}
+
 			startNumStart := match[2]
 			startNumEnd := match[3]
 			endNumStart := match[4]
