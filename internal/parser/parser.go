@@ -43,7 +43,7 @@ var languageToISO = map[rtp.Language]string{
 	rtp.LanguageGerman:        "de",
 	rtp.LanguageFrench:        "fr",
 	rtp.LanguageItalian:       "it",
-//	rtp.LanguageUniversal:     "en", // Map universal to english as a safe fallback
+	rtp.LanguageUniversal:     "en", // Map universal to english as a safe fallback
 	rtp.LanguageRussian:       "ru",
 	rtp.LanguageJapanese:      "ja",
 	rtp.LanguageChinese:       "zh",
@@ -239,7 +239,7 @@ var filtersDef = []struct {
 	{"s-hulu", "gs", "HULU", `(?i)\bhulu\b`, nil},
 	{"s-pcok", "gs", "PEACOCK", `(?i)\b(?:pcok|peacock)\b`, nil},
 	{"s-pamp", "gs", "PARAMOUNT+", `(?i)\b(?:pmtp|pamp|paramount\+?|paramount[\s._-]?plus)\b`, nil},
-	{"s-croll", "gs", "CRUNCHYROLL", `(?i)\b(?:croll|crunchy|crunchyroll)\b`, nil},
+	{"s-crawl", "gs", "CRUNCHYROLL", `(?i)\b(?:croll|crunchy|crunchyroll)\b`, nil},
 }
 
 func init() {
@@ -629,6 +629,19 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 			if len(info.EpisodeNumbers) > 0 {
 				episode = info.EpisodeNumbers[0]
 			}
+
+			// Failsafe: If the third-party parser successfully found a season but failed to find
+			// the episode (common for 4-digit episode numbers like E1151), run our fallback sxeRegex
+			// to extract the episode index and prevent Episode = 0 full season pack leakage.
+			if episode == 0 {
+				if match := sxeRegex.FindStringSubmatch(clean); len(match) >= 3 {
+					ep, err := strconv.Atoi(match[2])
+					if err == nil {
+						episode = ep
+					}
+				}
+			}
+
 			result = &ParseResult{
 				Title:    info.SeriesTitle,
 				Season:   info.SeasonNumber,
@@ -756,7 +769,7 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 }
 
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
-	// Extract the base filename to prevent parent folder names (e.g., S01 EP (01-08)) from polluting parsing
+	// Extract the base filename to prevent parent folder names from polluting parsing
 	fileName := path
 	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
 		fileName = path[idx+1:]
