@@ -954,6 +954,7 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 							if err == nil && sNum != targetSeason {
 								isDifferentSeason = true
 								break
+							}
 						}
 					}
 					if !isDifferentSeason {
