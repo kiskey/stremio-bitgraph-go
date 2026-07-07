@@ -128,6 +128,9 @@ var audioChannelsRegex = regexp.MustCompile(`(?i)\b([1-9])\.([0-9])\b`)
 // Match standalone resolution numbers without trailing 'p' (e.g. 1080, 720, 2160) to prevent S10E80 parsing splits
 var resolutionNoPRegex = regexp.MustCompile(`\b(2160|1080|720|480|360)\b`)
 
+// Match leading release group brackets at the very start of the string (e.g. [uP], [df68], [AnimeRG])
+var leadingGroupBracketRe = regexp.MustCompile(`^\s*\[[a-zA-Z0-9_.-]+\]\s*`)
+
 // Conjoined metadata regexes with strict lower-bounds of 3 characters to prevent short-word collisions (e.g. Scratch1080p, Scratchx264, S01WEBRip)
 var conjoinedQualityRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
 var conjoinedCodecRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(x264|x265|h264|h265|hevc|avc)\b`)
@@ -490,6 +493,9 @@ func SanitizeName(name string) string {
 
 	// Replace audio channels like 5.1, 7.1, 2.0 with 5ch, 7ch, 2ch to prevent dot replacement from tokenizing them as series season/episode numbers (e.g. 5 1)
 	s = audioChannelsRegex.ReplaceAllString(s, "${1}ch")
+
+	// Strip leading release-group brackets (e.g., [uP] or [df68] or [AnimeRG]) at the very start of the string
+	s = leadingGroupBracketRe.ReplaceAllString(s, "")
 
 	// Insert spaces before conjoined technical keywords to prevent unified word tokenization failures (e.g. Scratch1080p -> Scratch 1080p)
 	s = conjoinedQualityRegex.ReplaceAllString(s, "$1 $2")
