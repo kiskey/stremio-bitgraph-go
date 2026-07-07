@@ -895,6 +895,28 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 				}
 			}
 
+			// Strict Standalone Numeric Check Fallback:
+			// If standard parsing failed or returned episode = 0, but isAnimation is true,
+			// check if the filename contains the targetEpisode as a standalone numeric token (e.g. "752.mp4" or "0752.mkv").
+			if !matched && isAnimation && (info.Episode == 0 || info.Episode == targetEpisode) {
+				if ExtractNumericEpisode(c.Path, targetEpisode) {
+					matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
+					isDifferentSeason := false
+					for _, match := range matches {
+						if len(match) >= 2 {
+							sNum, err := strconv.Atoi(match[1])
+							if err == nil && sNum != targetSeason {
+								isDifferentSeason = true
+								break
+							}
+						}
+					}
+					if !isDifferentSeason {
+						matched = true
+					}
+				}
+			}
+
 			// Check multi-episode parsed array by releasetitleparser (if available)
 			parsedInfo := ParseFilePath(c.Path, fallbackSeason)
 			if parsedInfo.Season == targetSeason && parsedInfo.Episode == targetEpisode {
@@ -915,6 +937,25 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 				}
 				if !isDifferentSeason {
 					matched = true
+				}
+			}
+
+			if !matched && isAnimation && parsedInfo.Episode == 0 {
+				if ExtractNumericEpisode(c.Path, targetEpisode) {
+					matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
+					isDifferentSeason := false
+					for _, match := range matches {
+						if len(match) >= 2 {
+							sNum, err := strconv.Atoi(match[1])
+							if err == nil && sNum != targetSeason {
+								isDifferentSeason = true
+								break
+							}
+						}
+					}
+					if !isDifferentSeason {
+						matched = true
+					}
 				}
 			}
 
@@ -988,4 +1029,75 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 
 func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, isAnimation bool) (CandidateFile, bool) {
 	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "", isAnimation)
+}
+
+// HasExcludingRange checks if the torrent name explicitly declares a range that excludes our requested episode
+func HasExcludingRange(name string, targetEpisode int) bool {
+	if targetEpisode == 0 {
+		return false
+	}
+	
+	// Scan for standard range formats, e.g. 579-628, EP 579-628, E579-E628, episodes 579 to 628
+	matches := rangeRegex.FindAllStringSubmatchIndex(name, -1)
+	for _, match := range matches {
+		if len(match) >= 6 {
+			startNumStart := match[2]
+			startNumEnd := match[3]
+			endNumStart := match[4]
+			endNumEnd := match[5]
+
+			if startNumStart > 0 && isDecimalDot(name, startNumStart-1) {
+				continue
+			}
+			if endNumEnd < len(name) && isDecimalDot(name, endNumEnd) {
+				continue
+			}
+
+			start, err1 := strconv.Atoi(name[startNumStart:startNumEnd])
+			end, err2 := strconv.Atoi(name[endNumStart:endNumEnd])
+			if err1 == nil && err2 == nil {
+				if start <= end {
+					if targetEpisode < start || targetEpisode > end {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ExtractNumericEpisode attempts to find a standalone integer in the filename
+// that matches the targetEpisode exactly, bypassing complex parser libraries for clean numeric streams.
+func ExtractNumericEpisode(path string, targetEpisode int) bool {
+	if targetEpisode == 0 {
+		return false
+	}
+	
+	// Get the base filename
+	fileName := path
+	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
+		fileName = path[idx+1:]
+	}
+	
+	// Remove file extension
+	if dotIdx := strings.LastIndex(fileName, "."); dotIdx != -1 {
+		fileName = fileName[:dotIdx]
+	}
+	
+	// Clean non-alphanumeric characters but preserve digit grouping
+	cleaned := SanitizeName(fileName)
+	
+	// Split into space-separated fields and find if any token exactly matches the targetEpisode (as string)
+	targetStr := strconv.Itoa(targetEpisode)
+	targetStrPadded := fmt.Sprintf("%02d", targetEpisode)
+	targetStrPadded3 := fmt.Sprintf("%03d", targetEpisode)
+	targetStrPadded4 := fmt.Sprintf("%04d", targetEpisode)
+	
+	for _, token := range strings.Fields(cleaned) {
+		if token == targetStr || token == targetStrPadded || token == targetStrPadded3 || token == targetStrPadded4 {
+			return true
+		}
+	}
+	return false
 }
