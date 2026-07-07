@@ -43,7 +43,7 @@ var languageToISO = map[rtp.Language]string{
 	rtp.LanguageGerman:        "de",
 	rtp.LanguageFrench:        "fr",
 	rtp.LanguageItalian:       "it",
-	rtp.LanguageUniversal:     "en", // Map universal to english as a safe fallback
+//	rtp.LanguageUniversal:     "en", // Map universal to english as a safe fallback
 	rtp.LanguageRussian:       "ru",
 	rtp.LanguageJapanese:      "ja",
 	rtp.LanguageChinese:       "zh",
