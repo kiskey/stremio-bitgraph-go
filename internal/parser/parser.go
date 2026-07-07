@@ -818,7 +818,11 @@ func isDecimalDot(s string, i int) bool {
 	return left >= '0' && left <= '9' && right >= '0' && right <= '9'
 }
 
-func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, airDate string) (CandidateFile, bool) {
+func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, isAnimation bool) (CandidateFile, bool) {
+	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "", isAnimation)
+}
+
+func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, airDate string, isAnimation bool) (CandidateFile, bool) {
 	var bestCandidate CandidateFile
 	var found bool
 	var maxWeight int64 = -1
@@ -874,10 +878,47 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 				matched = true
 			}
 
+			// Absolute Episode Bypass for Anime: If the show is animated and the file matches the absolute episode number exactly,
+			// we can bypass the strict season match, provided the file does not reside in an explicitly different season folder.
+			if !matched && isAnimation && info.Episode == targetEpisode {
+				// Ensure it doesn't belong to a different season folder
+				matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
+				isDifferentSeason := false
+				for _, match := range matches {
+					if len(match) >= 2 {
+						sNum, err := strconv.Atoi(match[1])
+						if err == nil && sNum != targetSeason {
+							isDifferentSeason = true
+							break
+						}
+					}
+				}
+				if !isDifferentSeason {
+					matched = true
+				}
+			}
+
 			// Check multi-episode parsed array by releasetitleparser (if available)
 			parsedInfo := ParseFilePath(c.Path, fallbackSeason)
 			if parsedInfo.Season == targetSeason && parsedInfo.Episode == targetEpisode {
 				matched = true
+			}
+
+			if !matched && isAnimation && parsedInfo.Episode == targetEpisode {
+				matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
+				isDifferentSeason := false
+				for _, match := range matches {
+					if len(match) >= 2 {
+						sNum, err := strconv.Atoi(match[1])
+						if err == nil && sNum != targetSeason {
+							isDifferentSeason = true
+							break
+						}
+					}
+				}
+				if !isDifferentSeason {
+					matched = true
+				}
 			}
 
 			// Check Range Regex (e.g. S01E21-22)
@@ -948,6 +989,6 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 	return CandidateFile{}, false
 }
 
-func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
-	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "")
+func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, isAnimation bool) (CandidateFile, bool) {
+	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "", isAnimation)
 }
