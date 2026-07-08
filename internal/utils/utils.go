@@ -89,8 +89,14 @@ var bracketRegex = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
 // Match common decimal channel audio configurations (e.g. 5.1, 7.1, 2.0) to prevent TV show misclassifications
 var audioChannelsRegex = regexp.MustCompile(`(?i)\b([1-9])\.([0-9])\b`)
 
+// Match standalone resolution numbers without trailing 'p' (e.g. 1080, 720, 2160) to prevent S10E80 parsing splits
+var resolutionNoPRegex = regexp.MustCompile(`\b(2160|1080|720|480|360)\b`)
+
 func SanitizeName(name string) string {
 	s := name
+
+	// Normalize standalone resolutions to include 'p' (e.g., 1080 -> 1080p) to prevent TV parser misclassifying them as S10E80
+	s = resolutionNoPRegex.ReplaceAllString(s, "${1}p")
 
 	// Replace audio channels like 5.1, 7.1, 2.0 with 5ch, 7ch, 2ch to prevent dot replacement from tokenizing them as series season/episode numbers (e.g. 5 1)
 	s = audioChannelsRegex.ReplaceAllString(s, "${1}ch")

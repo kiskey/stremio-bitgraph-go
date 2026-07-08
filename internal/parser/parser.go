@@ -43,6 +43,7 @@ var languageToISO = map[rtp.Language]string{
 	rtp.LanguageGerman:        "de",
 	rtp.LanguageFrench:        "fr",
 	rtp.LanguageItalian:       "it",
+//	rtp.LanguageUniversal:     "en", // Map universal to english as a safe fallback
 	rtp.LanguageRussian:       "ru",
 	rtp.LanguageJapanese:      "ja",
 	rtp.LanguageChinese:       "zh",
@@ -103,8 +104,12 @@ var seasonFolderRegex = regexp.MustCompile(`(?i)\b(?:s|season|series)\s*0*(\d+)\
 
 // Pre-compiled regexes for RobustParseInfo safety fallback
 var sxeRegex = regexp.MustCompile(`(?i)\bS(\d+)\s*E(\d+)\b`)
-var crossRegex = regexp.MustCompile(`(?i)\b(\d+)\s*x\s*(\d+)\b`)
-var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to)\s*0*(\d+)\b`)
+
+// Restrict crossRegex to 1-2 digit seasons and 2-4 digit episodes to prevent Year-Codec / Resolution-Codec collisions
+var crossRegex = regexp.MustCompile(`(?i)\b([0-9]{1,2})\s*x\s*([0-9]{2,4})\b`)
+
+// Refined seasonRangeRegex to optionally support redundant second season prefixes (e.g. S01-S21, Season 1 to Season 2)
+var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to|~)\s*(?:s|season|seasons)?\s*0*(\d+)\b`)
 
 // Regional patterns for TamilMV/TamilBlasters indexer formats
 var regionalRangeRegex = regexp.MustCompile(`(?i)\b(?:season|s|series)\s*(\d+)\s*(?:ep|episode|e)?\s*[\(\[]?\s*(\d+)\s*(?:-|to)\s*(\d+)\s*[\)\]]?\b`)
@@ -119,6 +124,12 @@ var websitePrefixRegex = regexp.MustCompile(`(?i)(?:^|[\s_.-]*)(?:(?:www\d*\.)[a
 
 // Match common decimal channel audio configurations (e.g. 5.1, 7.1, 2.0) to prevent TV show misclassifications
 var audioChannelsRegex = regexp.MustCompile(`(?i)\b([1-9])\.([0-9])\b`)
+
+// Match standalone resolution numbers without trailing 'p' (e.g. 1080, 720, 2160) to prevent S10E80 parsing splits
+var resolutionNoPRegex = regexp.MustCompile(`\b(2160|1080|720|480|360)\b`)
+
+// Match leading release group brackets at the very start of the string (e.g. [uP], [df68], [AnimeRG])
+var leadingGroupBracketRe = regexp.MustCompile(`^\s*\[[a-zA-Z0-9_.-]+\]\s*`)
 
 // Conjoined metadata regexes with strict lower-bounds of 3 characters to prevent short-word collisions (e.g. Scratch1080p, Scratchx264, S01WEBRip)
 var conjoinedQualityRegex = regexp.MustCompile(`(?i)\b([a-z]{3,})(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
@@ -228,7 +239,7 @@ var filtersDef = []struct {
 	{"s-hulu", "gs", "HULU", `(?i)\bhulu\b`, nil},
 	{"s-pcok", "gs", "PEACOCK", `(?i)\b(?:pcok|peacock)\b`, nil},
 	{"s-pamp", "gs", "PARAMOUNT+", `(?i)\b(?:pmtp|pamp|paramount\+?|paramount[\s._-]?plus)\b`, nil},
-	{"s-croll", "gs", "CRUNCHYROLL", `(?i)\b(?:croll|crunchy|crunchyroll)\b`, nil},
+	{"s-crawl", "gs", "CRUNCHYROLL", `(?i)\b(?:croll|crunchy|crunchyroll)\b`, nil},
 }
 
 func init() {
@@ -303,6 +314,33 @@ func MatchRange(path string, targetEpisode int) bool {
 	matches := rangeRegex.FindAllStringSubmatchIndex(fileName, -1)
 	for _, match := range matches {
 		if len(match) >= 6 {
+			matchStart := match[0]
+			precedingStart := matchStart - 8
+			if precedingStart < 0 {
+				precedingStart = 0
+			}
+			contextPrefix := strings.ToLower(fileName[precedingStart:matchStart])
+			trimmedPrefix := strings.TrimRight(contextPrefix, " .-_[]()/\\")
+
+			isSeasonPrefix := false
+			if strings.Contains(trimmedPrefix, "season") || strings.Contains(trimmedPrefix, "seasons") {
+				isSeasonPrefix = true
+			} else if strings.HasSuffix(trimmedPrefix, "s") {
+				sIdx := strings.LastIndex(trimmedPrefix, "s")
+				if sIdx == 0 {
+					isSeasonPrefix = true
+				} else if sIdx > 0 {
+					prevChar := trimmedPrefix[sIdx-1]
+					if (prevChar < 'a' || prevChar > 'z') && (prevChar < '0' || prevChar > '9') {
+						isSeasonPrefix = true
+					}
+				}
+			}
+
+			if isSeasonPrefix {
+				continue // Ignore season range matches inside absolute episode evaluations
+			}
+
 			startNumStart := match[2]
 			startNumEnd := match[3]
 			endNumStart := match[4]
@@ -474,8 +512,14 @@ func getQuality(res int) string {
 }
 
 func SanitizeName(name string) string {
+	// Strip leading release-group brackets (e.g., [uP] or [df68] or [AnimeRG]) at the very start of the string
+	s := leadingGroupBracketRe.ReplaceAllString(name, "")
+
 	// Strip Radarr/Sonarr-style Website Prefix Domains (e.g. www.1TamilMV.yt - or [TamilBlasters.gripe] ) before parsing
-	s := websitePrefixRegex.ReplaceAllString(name, "")
+	s = websitePrefixRegex.ReplaceAllString(s, "")
+
+	// Normalize standalone resolutions to include 'p' (e.g., 1080 -> 1080p) to prevent TV parser misclassifying them as S10E80
+	s = resolutionNoPRegex.ReplaceAllString(s, "${1}p")
 
 	// Replace audio channels like 5.1, 7.1, 2.0 with 5ch, 7ch, 2ch to prevent dot replacement from tokenizing them as series season/episode numbers (e.g. 5 1)
 	s = audioChannelsRegex.ReplaceAllString(s, "${1}ch")
@@ -612,6 +656,19 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 			if len(info.EpisodeNumbers) > 0 {
 				episode = info.EpisodeNumbers[0]
 			}
+
+			// Failsafe: If the third-party parser successfully found a season but failed to find
+			// the episode (common for 4-digit episode numbers like E1151), run our fallback sxeRegex
+			// to extract the episode index and prevent Episode = 0 full season pack leakage.
+			if episode == 0 {
+				if match := sxeRegex.FindStringSubmatch(clean); len(match) >= 3 {
+					ep, err := strconv.Atoi(match[2])
+					if err == nil {
+						episode = ep
+					}
+				}
+			}
+
 			result = &ParseResult{
 				Title:    info.SeriesTitle,
 				Season:   info.SeasonNumber,
@@ -648,7 +705,6 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 				parsedTitle = strings.TrimSpace(clean[:match[0]])
 				found = true
 			} else if match := crossRegex.FindStringSubmatchIndex(clean); len(match) >= 6 {
-				// 4. Try to find standard XXxXX pattern
 				season, _ = strconv.Atoi(clean[match[2]:match[3]])
 				episode, _ = strconv.Atoi(clean[match[4]:match[5]])
 				parsedTitle = strings.TrimSpace(clean[:match[0]])
@@ -740,7 +796,7 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 }
 
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
-	// Extract the base filename to prevent parent folder names (e.g., S01 EP (01-08)) from polluting parsing
+	// Extract the base filename to prevent parent folder names from polluting parsing
 	fileName := path
 	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
 		fileName = path[idx+1:]
@@ -809,7 +865,7 @@ func isDecimalDot(s string, i int) bool {
 	return left >= '0' && left <= '9' && right >= '0' && right <= '9'
 }
 
-func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, airDate string) (CandidateFile, bool) {
+func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, airDate string, isAnimation bool) (CandidateFile, bool) {
 	var bestCandidate CandidateFile
 	var found bool
 	var maxWeight int64 = -1
@@ -821,11 +877,20 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 	}
 
 	parts := strings.Split(airDate, "-")
-	var dotAirDate, dashAirDate, spaceAirDate string
+	var permutations []string
 	if len(parts) == 3 {
-		dotAirDate = fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
-		dashAirDate = airDate
-		spaceAirDate = fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
+		y, m, d := parts[0], parts[1], parts[2]
+		permutations = []string{
+			fmt.Sprintf("%s.%s.%s", y, m, d),
+			fmt.Sprintf("%s-%s-%s", y, m, d),
+			fmt.Sprintf("%s %s %s", y, m, d),
+			fmt.Sprintf("%s.%s.%s", m, d, y),
+			fmt.Sprintf("%s-%s-%s", m, d, y),
+			fmt.Sprintf("%s %s %s", m, d, y),
+			fmt.Sprintf("%s.%s.%s", d, m, y),
+			fmt.Sprintf("%s-%s-%s", d, m, y),
+			fmt.Sprintf("%s %s %s", d, m, y),
+		}
 	}
 
 	// 1. Direct, Date, and Range-based Scanning with Size-weighting
@@ -839,10 +904,11 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 
 		// Check absolute air date match first for daily/long-running shows
 		if len(parts) == 3 {
-			if strings.Contains(lowerPath, dotAirDate) ||
-				strings.Contains(lowerPath, dashAirDate) ||
-				strings.Contains(lowerPath, spaceAirDate) {
-				matched = true
+			for _, perm := range permutations {
+				if strings.Contains(lowerPath, perm) {
+					matched = true
+					break
+				}
 			}
 		}
 
@@ -855,10 +921,88 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 				matched = true
 			}
 
+			// Absolute Episode Bypass for Anime: If the show is animated and the file matches the absolute episode number exactly,
+			// we can bypass the strict season match, provided the file does not reside in an explicitly different season folder.
+			if !matched && isAnimation && info.Episode == targetEpisode {
+				// Ensure it doesn't belong to a different season folder
+				matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
+				isDifferentSeason := false
+				for _, match := range matches {
+					if len(match) >= 2 {
+						sNum, err := strconv.Atoi(match[1])
+						if err == nil && sNum != targetSeason {
+							isDifferentSeason = true
+							break
+						}
+					}
+				}
+				if !isDifferentSeason {
+					matched = true
+				}
+			}
+
+			// Strict Standalone Numeric Check Fallback:
+			// If standard parsing failed or returned episode = 0, but isAnimation is true,
+			// check if the filename contains the targetEpisode as a standalone numeric token (e.g. "752.mp4" or "0752.mkv").
+			if !matched && isAnimation && (info.Episode == 0 || info.Episode == targetEpisode) {
+				if ExtractNumericEpisode(c.Path, targetEpisode) {
+					matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
+					isDifferentSeason := false
+					for _, match := range matches {
+						if len(match) >= 2 {
+							sNum, err := strconv.Atoi(match[1])
+							if err == nil && sNum != targetSeason {
+								isDifferentSeason = true
+								break
+							}
+						}
+					}
+					if !isDifferentSeason {
+						matched = true
+					}
+				}
+			}
+
 			// Check multi-episode parsed array by releasetitleparser (if available)
 			parsedInfo := ParseFilePath(c.Path, fallbackSeason)
 			if parsedInfo.Season == targetSeason && parsedInfo.Episode == targetEpisode {
 				matched = true
+			}
+
+			if !matched && isAnimation && parsedInfo.Episode == targetEpisode {
+				matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
+				isDifferentSeason := false
+				for _, match := range matches {
+					if len(match) >= 2 {
+						sNum, err := strconv.Atoi(match[1])
+						if err == nil && sNum != targetSeason {
+							isDifferentSeason = true
+							break
+						}
+					}
+				}
+				if !isDifferentSeason {
+					matched = true
+				}
+			}
+
+			if !matched && isAnimation && parsedInfo.Episode == 0 {
+				if ExtractNumericEpisode(c.Path, targetEpisode) {
+					matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
+					isDifferentSeason := false
+					for _, match := range matches {
+						if len(match) >= 2 {
+							sNum, err := strconv.Atoi(match[1])
+							if err == nil && sNum != targetSeason {
+								isDifferentSeason = true
+								break
+							}
+						}
+					}
+					if !isDifferentSeason {
+						matched = true
+					}
+				}
 			}
 
 			// Check Range Regex (e.g. S01E21-22)
@@ -929,6 +1073,104 @@ func FindBestSeriesFileLongRunning(candidates []CandidateFile, targetSeason, tar
 	return CandidateFile{}, false
 }
 
-func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
-	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "")
+func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int, isAnimation bool) (CandidateFile, bool) {
+	return FindBestSeriesFileLongRunning(candidates, targetSeason, targetEpisode, fallbackSeason, "", isAnimation)
+}
+
+// HasExcludingRange checks if the torrent name explicitly declares a range that excludes our requested episode
+func HasExcludingRange(name string, targetEpisode int) bool {
+	if targetEpisode == 0 {
+		return false
+	}
+	
+	// Scan for standard range formats, e.g. 579-628, EP 579-628, E579-E628, episodes 579 to 628
+	matches := rangeRegex.FindAllStringSubmatchIndex(name, -1)
+	for _, match := range matches {
+		if len(match) >= 6 {
+			matchStart := match[0]
+			precedingStart := matchStart - 8
+			if precedingStart < 0 {
+				precedingStart = 0
+			}
+			contextPrefix := strings.ToLower(name[precedingStart:matchStart])
+			trimmedPrefix := strings.TrimRight(contextPrefix, " .-_[]()/\\")
+
+			isSeasonPrefix := false
+			if strings.Contains(trimmedPrefix, "season") || strings.Contains(trimmedPrefix, "seasons") {
+				isSeasonPrefix = true
+			} else if strings.HasSuffix(trimmedPrefix, "s") {
+				sIdx := strings.LastIndex(trimmedPrefix, "s")
+				if sIdx == 0 {
+					isSeasonPrefix = true
+				} else if sIdx > 0 {
+					prevChar := trimmedPrefix[sIdx-1]
+					if (prevChar < 'a' || prevChar > 'z') && (prevChar < '0' || prevChar > '9') {
+						isSeasonPrefix = true
+					}
+				}
+			}
+
+			if isSeasonPrefix {
+				continue // Ignore season range matches
+			}
+
+			startNumStart := match[2]
+			startNumEnd := match[3]
+			endNumStart := match[4]
+			endNumEnd := match[5]
+
+			if startNumStart > 0 && isDecimalDot(name, startNumStart-1) {
+				continue
+			}
+			if endNumEnd < len(name) && isDecimalDot(name, endNumEnd) {
+				continue
+			}
+
+			start, err1 := strconv.Atoi(name[startNumStart:startNumEnd])
+			end, err2 := strconv.Atoi(name[endNumStart:endNumEnd])
+			if err1 == nil && err2 == nil {
+				if start <= end {
+					if targetEpisode < start || targetEpisode > end {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ExtractNumericEpisode attempts to find a standalone integer in the filename
+// that matches the targetEpisode exactly, bypassing complex parser libraries for clean numeric streams.
+func ExtractNumericEpisode(path string, targetEpisode int) bool {
+	if targetEpisode == 0 {
+		return false
+	}
+	
+	// Get the base filename
+	fileName := path
+	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
+		fileName = path[idx+1:]
+	}
+	
+	// Remove file extension
+	if dotIdx := strings.LastIndex(fileName, "."); dotIdx != -1 {
+		fileName = fileName[:dotIdx]
+	}
+	
+	// Clean non-alphanumeric characters but preserve digit grouping
+	cleaned := SanitizeName(fileName)
+	
+	// Split into space-separated fields and find if any token exactly matches the targetEpisode (as string)
+	targetStr := strconv.Itoa(targetEpisode)
+	targetStrPadded := fmt.Sprintf("%02d", targetEpisode)
+	targetStrPadded3 := fmt.Sprintf("%03d", targetEpisode)
+	targetStrPadded4 := fmt.Sprintf("%04d", targetEpisode)
+	
+	for _, token := range strings.Fields(cleaned) {
+		if token == targetStr || token == targetStrPadded || token == targetStrPadded3 || token == targetStrPadded4 {
+			return true
+		}
+	}
+	return false
 }

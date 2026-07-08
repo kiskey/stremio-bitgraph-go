@@ -85,6 +85,16 @@ var metadataWords = map[string]bool{
 	"th": true, "vi": true, "he": true, "fa": true, "soft": true, "hard": true,
 	"ntsc": true, "pal": true, "open": true, "matte": true, "unrated": true, "rated": true,
 	"subbed": true, "rosubbed": true, "nlsubs": true, "engsub": true,
+
+	// Non-duplicate plural and multilingual additions (Parity Sanitization Matrix)
+	"episodes":   true,
+	"seasons":    true,
+	"eps":        true,
+	"vost":       true,
+	"dual-audio": true,
+	"multi-sub":  true,
+	"german":     true,
+	"italian":    true,
 }
 
 // sequelIndicators are words that strongly suggest a different franchise entry.
@@ -145,7 +155,8 @@ var ignoredNumbers = map[string]bool{
 	"576": true, "264": true, "265": true, "10": true, "8": true,
 }
 
-var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to)\s*0*(\d+)\b`)
+// Refined seasonRangeRegex to optionally support redundant second season prefixes (e.g. S01-S21, Season 1 to Season 2)
+var seasonRangeRegex = regexp.MustCompile(`(?i)\b(?:s|season|seasons)\s*0*(\d+)\s*(?:-|to|~)\s*(?:s|season|seasons)?\s*0*(\d+)\b`)
 
 // Self-Learning Entropy Engine Global State Variables
 var (
@@ -155,13 +166,44 @@ var (
 )
 
 var abbreviationMap = map[string][]string{
-	"dr":   {"doctor"},
-	"st":   {"saint"},
-	"mr":   {"mister"},
-	"mrs":  {"missus", "missis"},
-	"vs":   {"versus"},
-	"wk":   {"week"},
-	"ft":   {"feat", "featuring"},
+	"dr":  {"doctor"},
+	"st":  {"saint"},
+	"mr":  {"mister"},
+	"mrs": {"missus", "missis"},
+	"vs":  {"versus"},
+	"wk":  {"week"},
+	"ft":  {"feat", "featuring"},
+}
+
+// standardizePunctuation normalizes dashes, quotes, and punctuation-heavy indicators (Sonarr/Radarr Parity)
+func standardizePunctuation(s string) string {
+	// Step 1: Strip apostrophes and quotes entirely to prevent trailing standalone noise letters (e.g. Marvel's -> Marvels)
+	s = strings.ReplaceAll(s, "'", "")
+	s = strings.ReplaceAll(s, "’", "")
+	s = strings.ReplaceAll(s, "‘", "")
+	s = strings.ReplaceAll(s, "´", "")
+	s = strings.ReplaceAll(s, "`", "")
+	s = strings.ReplaceAll(s, "\"", "")
+	s = strings.ReplaceAll(s, "“", "")
+	s = strings.ReplaceAll(s, "”", "")
+
+	// Step 2: Normalize Ampersands to "and" to ensure perfect keyword matching
+	s = strings.ReplaceAll(s, "&", " and ")
+
+	// Step 3: Replace non-standard dashes and middle dots with spaces
+	r := strings.NewReplacer(
+		"·", " ",
+		"•", " ",
+		"—", " ",
+		"–", " ",
+	)
+	s = r.Replace(s)
+
+	// Step 4: Normalize hyphens and colons to standard spaces to align token boundaries (e.g. Wall-E -> Wall E)
+	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.ReplaceAll(s, ":", " ")
+
+	return s
 }
 
 func ExpandAbbreviations(title string) string {
@@ -258,10 +300,6 @@ func isBlockedArchive(name string) bool {
 		strings.HasSuffix(lower, ".tar") ||
 		strings.HasSuffix(lower, ".tgz") ||
 		strings.HasSuffix(lower, ".gz")
-}
-
-func isAlphaNum(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 }
 
 func containsNonASCII(s string) bool {
@@ -381,8 +419,11 @@ func isTechnicalToken(s string) bool {
 // unrelated multi-word torrents (e.g. "Upgraded", "Italian"). It allows metadata
 // words (codecs, quality tags, languages) to pass through.
 func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) bool {
-	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
-	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
+	stdTarget := standardizePunctuation(targetTitle)
+	stdParsed := standardizePunctuation(parsedTitle)
+
+	cleanTarget := strings.Trim(strings.ToLower(stdTarget), " .-_[]()/\\")
+	cleanParsed := strings.Trim(strings.ToLower(stdParsed), " .-_[]()/\\")
 
 	// Temporarily replace hyphens with standard spaces to handle dash-joined titles
 	// like "From-Scratch" matching "From Scratch" cleanly.
@@ -399,6 +440,16 @@ func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) boo
 		return true
 	}
 
+	// ── MOVIE PREFIX BYPASS ──
+	// For Movie queries, if the parsed title matches the start of our target title,
+	// we bypass the aggressive single-word guardrail. This allows multi-movie packs, 
+	// localized translations, and bonus feature discs (e.g. "WALL-E BURN-E") to match safely.
+	cleanTargetNoSpace := strings.ReplaceAll(targetNoArt, " ", "")
+	cleanParsedNoSpace := strings.ReplaceAll(parsedNoArt, " ", "")
+	if strings.HasPrefix(cleanParsedNoSpace, cleanTargetNoSpace) {
+		return true
+	}
+
 	targetWords := strings.Fields(targetNoArt)
 	parsedWords := strings.Fields(parsedNoArt)
 
@@ -410,7 +461,8 @@ func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) boo
 		targetWordSet[cleanWord(w)] = true
 	}
 	for _, alt := range altTitles {
-		cleanAlt := strings.Trim(strings.ToLower(alt), " .-_[]()/\\")
+		stdAlt := standardizePunctuation(alt)
+		cleanAlt := strings.Trim(strings.ToLower(stdAlt), " .-_[]()/\\")
 		cleanAlt = strings.ReplaceAll(cleanAlt, "-", " ")
 		altNoArt := stripLeadingArticles(cleanAlt)
 		for _, w := range strings.Fields(altNoArt) {
@@ -821,19 +873,157 @@ func sequelGuardrailParsed(cleanTarget, cleanParsed string, score float64) float
 	return score
 }
 
+// ── COMPREHENSIVE SONARR/RADARR PARITY SANITIZATION PIPELINE ──────────────────
+
+var (
+	// Matches inner brackets/parentheses safely (e.g. [AnimeRG] or (Episodes 001-837) or 【pseudo】)
+	bracketExtractRe = regexp.MustCompile(`[([【（][^()\[\]【】（）]+[)\]】）]`)
+
+	// Slice Boundaries: Slices unbracketed titles at the earliest occurrence of any of these patterns
+	sliceBoundaryRe = regexp.MustCompile(`(?i)\b(?:seasons?|s)\s*\d+|\b(?:episodes?|eps?|e|ep)\s*\d+|\bS\d+E\d+|\b\d+x\d+|\b\d+\s*(?:-|to|~)\s*\d+\b|\b(?:2160p|1080p|720p|480p|360p|4k|uhd|bluray|web[-_.]?dl|webrip|hdtv|bdrip|brrip|dvdrip|hdr|sdr|h264|h265|x264|x265|hevc)\b`)
+)
+
+// isBracketMetadata evaluates if a bracket's inner content should be treated as metadata.
+// It recursively reuses existing codebase validators (CompiledFilters, theatrical leak regexes, Anime Shield markers).
+func isBracketMetadata(inner string) bool {
+	innerClean := strings.TrimSpace(inner)
+	if innerClean == "" {
+		return true
+	}
+
+	// 1. Check against the compiled badge filters from the badge engine (parser.CompiledFilters)
+	for i := range parser.CompiledFilters {
+		filter := &parser.CompiledFilters[i]
+		if filter.Positive.MatchString(innerClean) {
+			return true
+		}
+	}
+
+	// 2. Check against low-quality theatrical leak matchers (re-used from parser.go)
+	if parser.DetectLowQuality(innerClean) != "" {
+		return true
+	}
+
+	// 3. Check against Anime Shield regex sets to identify animation-specific indicators
+	if animeLangRe.MatchString(innerClean) ||
+		animeCrcHashRe.MatchString(innerClean) ||
+		animeSourceRe.MatchString(innerClean) ||
+		westernSourceRe.MatchString(innerClean) ||
+		liveActionMarkerRe.MatchString(innerClean) {
+		return true
+	}
+
+	// 4. Token-based classification pass: if majority of words are technical metadata words/numbers
+	words := strings.Fields(strings.ToLower(standardizePunctuation(innerClean)))
+	if len(words) == 0 {
+		return true
+	}
+
+	metadataCount := 0
+	for _, w := range words {
+		cw := cleanWord(w)
+		if cw == "" {
+			metadataCount++
+			continue
+		}
+		if isTechnicalToken(cw) || isRomanSequence(cw) || ignoredNumbers[cw] {
+			metadataCount++
+		}
+	}
+
+	// If at least 50% of the words are metadata tokens, classify the whole bracket as metadata
+	return float64(metadataCount)/float64(len(words)) >= 0.5
+}
+
+// phoneticTransliterate replaces characters phonetically for global translation parity (Cyrillic & Eastern Europe support)
+func phoneticTransliterate(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	// Case-insensitive phonetic mapping for Russian/Italian transliterations (e.g. Valli -> Walli, Wall-I -> Wall-E)
+	if strings.HasPrefix(s, "vall") {
+		s = "wall" + s[4:]
+	}
+	if strings.HasSuffix(s, "i") {
+		s = s[:len(s)-1] + "e"
+	} else if strings.HasSuffix(s, "y") {
+		s = s[:len(s)-1] + "e"
+	}
+	return s
+}
+
+// PreSanitizeMovieTorrentName strips non-year metadata brackets from raw movie names.
+// This prevents custom encoder tags (like S90, S91) from being parsed as valid TV seasons before parser execution.
+func PreSanitizeMovieTorrentName(name string) string {
+	name = bracketExtractRe.ReplaceAllStringFunc(name, func(match string) string {
+		if len(match) < 2 {
+			return match
+		}
+		inner := match[1 : len(match)-1]
+		innerTrim := strings.TrimSpace(inner)
+		// If the bracket represents a 4-digit release year, do not strip it so the parser can resolve the year.
+		if len(innerTrim) == 4 && isNumber(innerTrim) {
+			return match
+		}
+		if isBracketMetadata(inner) {
+			return " "
+		}
+		return match
+	})
+	return name
+}
+
+// NormalizeTitleSonarrParity implements Sonarr/Radarr-parity title sanitization recursively
+func NormalizeTitleSonarrParity(s string) string {
+	s = standardizePunctuation(s)
+	s = strings.ReplaceAll(s, ".", " ")
+	s = strings.ReplaceAll(s, "_", " ")
+
+	// Pass 1: Recursive Bracket / Parenthetical stripping (Runs up to 3 times to safely resolve nested brackets)
+	for i := 0; i < 3; i++ {
+		prevLen := len(s)
+		s = bracketExtractRe.ReplaceAllStringFunc(s, func(match string) string {
+			if len(match) < 2 {
+				return match
+			}
+			inner := match[1 : len(match)-1]
+			if isBracketMetadata(inner) {
+				return " "
+			}
+			return match
+		})
+		if len(s) == prevLen {
+			break
+		}
+	}
+
+	// Pass 2: Unbracketed Boundary Slicing
+	if loc := sliceBoundaryRe.FindStringIndex(s); loc != nil {
+		if loc[0] > 0 { // Ensure we don't slice if the title itself begins with a keyword
+			s = s[:loc[0]]
+		}
+	}
+
+	// Collapse whitespace and return lowercase representation
+	s = strings.ToLower(strings.Join(strings.Fields(s), " "))
+
+	// Pass 3: Phonetic transliteration pass to enable translated/transliterated matching parity
+	return phoneticTransliterate(s)
+}
+
 func getTitleSimilarityParsed(tmdbTitle, parsedTitle string) float64 {
 	if tmdbTitle == "" || parsedTitle == "" {
 		return 0
 	}
 
-	cleanTmdb := strings.Trim(strings.ToLower(tmdbTitle), " .-_[]()/\\")
-	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
+	// Apply Sonarr/Radarr-parity normalization recursively to both incoming titles
+	cleanTmdb := NormalizeTitleSonarrParity(tmdbTitle)
+	cleanParsed := NormalizeTitleSonarrParity(parsedTitle)
 
-	cleanTmdb = ExpandAbbreviations(cleanTmdb)
-	cleanParsed = ExpandAbbreviations(cleanParsed)
-
-	cleanTmdb = normalizeNumbersInTitle(cleanTmdb)
-	cleanParsed = normalizeNumbersInTitle(cleanParsed)
+	if cleanTmdb == "" || cleanParsed == "" {
+		return 0.0
+	}
 
 	if hasNumericMismatch(cleanTmdb, cleanParsed) {
 		return 0.0
@@ -1095,6 +1285,14 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 				return nil
 			}
 
+			// Apply/Execute the Range Boundary Guardrail
+			// If the torrent name declares an explicit episode range,
+			// and our requested episode is strictly outside this range, reject the torrent immediately.
+			if parser.HasExcludingRange(td.Name, episode) {
+				utils.Logger.Debug("filtering out series torrent: requested episode is outside declared range", "name", td.Name, "episode", episode)
+				return nil
+			}
+
 			// Apply Temporal Disqualification Shield
 			if t.PublishedAt != "" && tmdbShow.PublishedAt != "" {
 				premiereY, err := strconv.Atoi(tmdbShow.PublishedAt)
@@ -1125,11 +1323,11 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 			}
 
 			if bestSim < config.SimilarityThreshold || matchingTitle == "" {
-				utils.Logger.Debug("filtering out series torrent: failed title similarity", 
-					"name", td.Name, 
-					"best_similarity", fmt.Sprintf("%.4f", bestSim), 
-					"threshold", config.SimilarityThreshold, 
-					"tmdb_title", tmdbShow.Title, 
+				utils.Logger.Debug("filtering out series torrent: failed title similarity",
+					"name", td.Name,
+					"best_similarity", fmt.Sprintf("%.4f", bestSim),
+					"threshold", config.SimilarityThreshold,
+					"tmdb_title", tmdbShow.Title,
 					"alt_titles", altTitles)
 				return nil
 			}
@@ -1180,14 +1378,24 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 			} else if isLongRunning && airDate != "" {
 				parts := strings.Split(airDate, "-")
 				if len(parts) == 3 {
-					dotAirDate := fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
-					dashAirDate := airDate
-					spaceAirDate := fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
+					y, m, d := parts[0], parts[1], parts[2]
+					permutations := []string{
+						fmt.Sprintf("%s.%s.%s", y, m, d),
+						fmt.Sprintf("%s-%s-%s", y, m, d),
+						fmt.Sprintf("%s %s %s", y, m, d),
+						fmt.Sprintf("%s.%s.%s", m, d, y),
+						fmt.Sprintf("%s-%s-%s", m, d, y),
+						fmt.Sprintf("%s %s %s", m, d, y),
+						fmt.Sprintf("%s.%s.%s", d, m, y),
+						fmt.Sprintf("%s-%s-%s", d, m, y),
+						fmt.Sprintf("%s %s %s", d, m, y),
+					}
 					lowerName := strings.ToLower(td.Name)
-					if strings.Contains(lowerName, dotAirDate) || 
-					   strings.Contains(lowerName, dashAirDate) || 
-					   strings.Contains(lowerName, spaceAirDate) {
-						matchedSeasonEpisodeOrDate = true
+					for _, perm := range permutations {
+						if strings.Contains(lowerName, perm) {
+							matchedSeasonEpisodeOrDate = true
+							break
+						}
 					}
 				}
 			}
@@ -1207,7 +1415,7 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 							})
 						}
 					}
-					if bestFile, found := parser.FindBestSeriesFileLongRunning(candidates, season, episode, parsed.Season, airDate); found {
+					if bestFile, found := parser.FindBestSeriesFileLongRunning(candidates, season, episode, parsed.Season, airDate, prior.IsAnimation); found {
 						local = append(local, Stream{
 							InfoHash:    t.InfoHash,
 							FileIndex:   bestFile.ID,
@@ -1237,14 +1445,24 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 					if !matched && isLongRunning && airDate != "" {
 						parts := strings.Split(airDate, "-")
 						if len(parts) == 3 {
-							dotAirDate := fmt.Sprintf("%s.%s.%s", parts[0], parts[1], parts[2])
-							dashAirDate := airDate
-							spaceAirDate := fmt.Sprintf("%s %s %s", parts[0], parts[1], parts[2])
+							y, m, d := parts[0], parts[1], parts[2]
+							permutations := []string{
+								fmt.Sprintf("%s.%s.%s", y, m, d),
+								fmt.Sprintf("%s-%s-%s", y, m, d),
+								fmt.Sprintf("%s %s %s", y, m, d),
+								fmt.Sprintf("%s.%s.%s", m, d, y),
+								fmt.Sprintf("%s-%s-%s", m, d, y),
+								fmt.Sprintf("%s %s %s", m, d, y),
+								fmt.Sprintf("%s.%s.%s", d, m, y),
+								fmt.Sprintf("%s-%s-%s", d, m, y),
+								fmt.Sprintf("%s %s %s", d, m, y),
+							}
 							lowerName := strings.ToLower(td.Name)
-							if strings.Contains(lowerName, dotAirDate) || 
-							   strings.Contains(lowerName, dashAirDate) || 
-							   strings.Contains(lowerName, spaceAirDate) {
-								matched = true
+							for _, perm := range permutations {
+								if strings.Contains(lowerName, perm) {
+									matched = true
+									break
+								}
 							}
 						}
 					}
@@ -1262,21 +1480,21 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 							Badges:      parser.FormatBadges(td.Name),
 						})
 					} else {
-						utils.Logger.Debug("filtering out series torrent: fallback failed (no season pack or episode match)", 
-							"name", td.Name, 
-							"parsed_season", parsed.Season, 
-							"parsed_episode", parsed.Episode, 
-							"requested_season", season, 
-							"requested_episode", episode, 
+						utils.Logger.Debug("filtering out series torrent: fallback failed (no season pack or episode match)",
+							"name", td.Name,
+							"parsed_season", parsed.Season,
+							"parsed_episode", parsed.Episode,
+							"requested_season", season,
+							"requested_episode", episode,
 							"is_season_pack", isSeasonPack)
 					}
 				}
 			} else {
-				utils.Logger.Debug("filtering out series torrent: parsed season/episode/date does not match requested", 
-					"name", td.Name, 
-					"parsed_season", parsed.Season, 
-					"parsed_episode", parsed.Episode, 
-					"requested_season", season, 
+				utils.Logger.Debug("filtering out series torrent: parsed season/episode/date does not match requested",
+					"name", td.Name,
+					"parsed_season", parsed.Season,
+					"parsed_episode", parsed.Episode,
+					"requested_season", season,
 					"requested_episode", episode)
 			}
 
@@ -1404,7 +1622,11 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				}
 			}
 
-			parsed := parser.RobustParseInfo(td.Name, 0)
+			// ── MOVIE PRE-PARSING SANITIZATION ──
+			// Strips metadata brackets recursively inside the similarity engine before parsing.
+			// This prevents custom encoder tags (like S90, S91) from misclassifying movies as TV shows.
+			sanitizedName := PreSanitizeMovieTorrentName(td.Name)
+			parsed := parser.RobustParseInfo(sanitizedName, 0)
 
 			// Find the title (primary or alternate) that actually matched
 			matchingTitle := ""
@@ -1422,10 +1644,10 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			}
 
 			if bestSim < config.SimilarityThreshold || matchingTitle == "" {
-				utils.Logger.Debug("filtering out movie torrent: failed title similarity", 
-					"name", td.Name, 
-					"best_similarity", fmt.Sprintf("%.4f", bestSim), 
-					"threshold", config.SimilarityThreshold, 
+				utils.Logger.Debug("filtering out movie torrent: failed title similarity",
+					"name", td.Name,
+					"best_similarity", fmt.Sprintf("%.4f", bestSim),
+					"threshold", config.SimilarityThreshold,
 					"tmdb_title", tmdbMovie.Title)
 				return nil
 			}
@@ -1445,7 +1667,26 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 					}
 				}
 
-				if !isAudioFakeSeries {
+				// Guardrail 2: If Season parses to >= 90 in movie mode (representing custom encoder presets like S90/S91 Joy Releases),
+				// clear TV indicators and bypass series rejection.
+				isEncoderFakeSeries := false
+				if parsed.Season >= 90 {
+					parsed.Season = 0
+					parsed.IsPack = false
+					isEncoderFakeSeries = true
+				}
+
+				// Guardrail 3: If Episode parses to >= 100 in movie mode (representing codec collisions
+				// like x264 -> Episode 264 or x265 -> Episode 265), clear TV indicators and bypass series rejection.
+				isCodecFakeSeries := false
+				if parsed.Episode == 264 || parsed.Episode == 265 || parsed.Episode >= 100 {
+					parsed.Season = 0
+					parsed.Episode = 0
+					parsed.IsPack = false
+					isCodecFakeSeries = true
+				}
+
+				if !isAudioFakeSeries && !isEncoderFakeSeries && !isCodecFakeSeries {
 					utils.Logger.Debug("filtering out movie torrent: contains TV series indicators", "name", td.Name, "season", parsed.Season, "episode", parsed.Episode, "is_pack", parsed.IsPack)
 					return nil
 				}

@@ -92,8 +92,6 @@ func ClassifyTargetPrior(meta AnimePriorMeta) float64 {
 		} else if c == "CN" || c == "TW" || c == "KR" {
 			score += 5.0
 			isEasternAsia = true
-		} else if c == "US" || c == "CA" || c == "GB" || c == "FR" || c == "DE" || c == "AU" {
-			score -= 10.0
 		}
 	}
 
@@ -106,6 +104,30 @@ func ClassifyTargetPrior(meta AnimePriorMeta) float64 {
 	return score
 }
 
+func isOfficialLicensedRetailRelease(filename string) bool {
+	// Leverage the pre-defined westernSourceRe platform regex to identify major licensed streaming sources
+	if westernSourceRe.MatchString(filename) {
+		return true
+	}
+	// Handle non-rigid digital platform variations frequently found in Usenet indexers or torrent filenames
+	lower := strings.ToLower(filename)
+	return strings.Contains(lower, "disneyplus") ||
+		strings.Contains(lower, "disney+") ||
+		strings.Contains(lower, "apple.tv") ||
+		strings.Contains(lower, "appletv") ||
+		strings.Contains(lower, "primevideo") ||
+		strings.Contains(lower, "prime.video") ||
+		strings.Contains(lower, "hbomax") ||
+		strings.Contains(lower, "crunchyroll") ||
+		strings.Contains(lower, "funimation") ||
+		strings.Contains(lower, "hidive") ||
+		strings.Contains(lower, "bilibili") ||
+		strings.Contains(lower, "bili.bili") ||
+		strings.Contains(lower, "muse.asia") ||
+		strings.Contains(lower, "ani-one") ||
+		strings.Contains(lower, "ani.one")
+}
+
 func ComputeCandidateScore(filename string) float64 {
 	var score float64 = 0.0
 	trimmed := strings.TrimSpace(filename)
@@ -114,7 +136,8 @@ func ComputeCandidateScore(filename string) float64 {
 		score += 12.0
 	}
 	if animeBracketPrefixRe.MatchString(trimmed) {
-		score += 5.0
+		// Demoted from 5.0 to 1.0 to prevent false-positives on bracketed standard Western cartoon releases (Sonarr/Radarr Parity)
+		score += 1.0
 	}
 	if animeGroupRe.MatchString(filename) {
 		score += 6.0
@@ -146,6 +169,12 @@ func EvaluateAnimeShield(filename string, prior AnimePriorMeta) bool {
 
 	candScore := ComputeCandidateScore(filename)
 	if targetPrior > 3.0 && candScore < -3.0 {
+		// Bypass Rejection: If this is an official licensed retail/digital distribution,
+		// we expect standard Western-style scene group formatting (such as WEB-DL-NF or AMZN).
+		// Therefore, we allow it to pass through cleanly.
+		if isOfficialLicensedRetailRelease(filename) {
+			return true
+		}
 		return false // Reject: Expected anime but got western live action
 	}
 	if targetPrior < -3.0 && candScore > 4.0 {
