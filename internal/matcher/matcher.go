@@ -85,6 +85,11 @@ var metadataWords = map[string]bool{
 	"th": true, "vi": true, "he": true, "fa": true, "soft": true, "hard": true,
 	"ntsc": true, "pal": true, "open": true, "matte": true, "unrated": true, "rated": true,
 	"subbed": true, "rosubbed": true, "nlsubs": true, "engsub": true,
+
+	// Plural and multilingual metadata additions (Parity Sanitization Matrix)
+	"episodes": true, "seasons": true, "eps": true, "vost": true,
+	"subbed": true, "dubbed": true, "dual-audio": true, "multi-sub": true,
+	"spanish": true, "french": true, "german": true, "italian": true,
 }
 
 // sequelIndicators are words that strongly suggest a different franchise entry.
@@ -156,13 +161,13 @@ var (
 )
 
 var abbreviationMap = map[string][]string{
-	"dr":   {"doctor"},
-	"st":   {"saint"},
-	"mr":   {"mister"},
-	"mrs":  {"missus", "missis"},
-	"vs":   {"versus"},
-	"wk":   {"week"},
-	"ft":   {"feat", "featuring"},
+	"dr":  {"doctor"},
+	"st":  {"saint"},
+	"mr":  {"mister"},
+	"mrs": {"missus", "missis"},
+	"vs":  {"versus"},
+	"wk":  {"week"},
+	"ft":  {"feat", "featuring"},
 }
 
 // standardizePunctuation normalizes non-standard middle dots, curly quotes, and dashes to standard ASCII representations
@@ -839,24 +844,115 @@ func sequelGuardrailParsed(cleanTarget, cleanParsed string, score float64) float
 	return score
 }
 
+// ── COMPREHENSIVE SONARR/RADARR PARITY SANITIZATION PIPELINE ──────────────────
+
+var (
+	// Matches inner brackets/parentheses safely (e.g. [AnimeRG] or (Episodes 001-837) or 【pseudo】)
+	bracketExtractRe = regexp.MustCompile(`[([【（][^()\[\]【】（）]+[)\]】）]`)
+
+	// Slice Boundaries: Slices unbracketed titles at the earliest occurrence of any of these patterns
+	sliceBoundaryRe = regexp.MustCompile(`(?i)\b(?:seasons?|s)\s*\d+|\b(?:episodes?|eps?|e|ep)\s*\d+|\bS\d+E\d+|\b\d+x\d+|\b\d+\s*(?:-|to|~)\s*\d+\b|\b(?:2160p|1080p|720p|480p|360p|4k|uhd|bluray|web[-_.]?dl|webrip|hdtv|bdrip|brrip|dvdrip|hdr|sdr|h264|h265|x264|x265|hevc)\b`)
+)
+
+// isBracketMetadata evaluates if a bracket's inner content should be treated as metadata.
+// It recursively reuses existing codebase validators (CompiledFilters, theatrical leak regexes, Anime Shield markers).
+func isBracketMetadata(inner string) bool {
+	innerClean := strings.TrimSpace(inner)
+	if innerClean == "" {
+		return true
+	}
+
+	// 1. Check against the compiled badge filters from the badge engine (parser.CompiledFilters)
+	for i := range parser.CompiledFilters {
+		filter := &parser.CompiledFilters[i]
+		if filter.Positive.MatchString(innerClean) {
+			return true
+		}
+	}
+
+	// 2. Check against low-quality theatrical leak matchers (re-used from parser.go)
+	if parser.DetectLowQuality(innerClean) != "" {
+		return true
+	}
+
+	// 3. Check against Anime Shield regex sets to identify animation-specific indicators
+	if animeLangRe.MatchString(innerClean) ||
+		animeCrcHashRe.MatchString(innerClean) ||
+		animeSourceRe.MatchString(innerClean) ||
+		westernSourceRe.MatchString(innerClean) ||
+		liveActionMarkerRe.MatchString(innerClean) {
+		return true
+	}
+
+	// 4. Token-based classification pass: if majority of words are technical metadata words/numbers
+	words := strings.Fields(strings.ToLower(standardizePunctuation(innerClean)))
+	if len(words) == 0 {
+		return true
+	}
+
+	metadataCount := 0
+	for _, w := range words {
+		cw := cleanWord(w)
+		if cw == "" {
+			metadataCount++
+			continue
+		}
+		if isTechnicalToken(cw) || isRomanSequence(cw) || ignoredNumbers[cw] {
+			metadataCount++
+		}
+	}
+
+	// If at least 50% of the words are metadata tokens, classify the whole bracket as metadata
+	return float64(metadataCount)/float64(len(words)) >= 0.5
+}
+
+// NormalizeTitleSonarrParity implements Sonarr/Radarr-parity title sanitization recursively
+func NormalizeTitleSonarrParity(s string) string {
+	s = standardizePunctuation(s)
+	s = strings.ReplaceAll(s, ".", " ")
+	s = strings.ReplaceAll(s, "_", " ")
+
+	// Pass 1: Recursive Bracket / Parenthetical stripping (Runs up to 3 times to safely resolve nested brackets)
+	for i := 0; i < 3; i++ {
+		prevLen := len(s)
+		s = bracketExtractRe.ReplaceAllStringFunc(s, func(match string) string {
+			if len(match) < 2 {
+				return match
+			}
+			inner := match[1 : len(match)-1]
+			if isBracketMetadata(inner) {
+				return " "
+			}
+			return match
+		})
+		if len(s) == prevLen {
+			break
+		}
+	}
+
+	// Pass 2: Unbracketed Boundary Slicing
+	if loc := sliceBoundaryRe.FindStringIndex(s); loc != nil {
+		if loc[0] > 0 { // Ensure we don't slice if the title itself begins with a keyword
+			s = s[:loc[0]]
+		}
+	}
+
+	// Collapse whitespace and return lowercase representation
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+}
+
 func getTitleSimilarityParsed(tmdbTitle, parsedTitle string) float64 {
 	if tmdbTitle == "" || parsedTitle == "" {
 		return 0
 	}
 
-	// Apply robust punctuation standardization to eliminate unicode middle dots, 
-	// curly apostrophes, and non-standard hyphens prior to evaluation.
-	stdTmdb := standardizePunctuation(tmdbTitle)
-	stdParsed := standardizePunctuation(parsedTitle)
+	// Apply Sonarr/Radarr-parity normalization recursively to both incoming titles
+	cleanTmdb := NormalizeTitleSonarrParity(tmdbTitle)
+	cleanParsed := NormalizeTitleSonarrParity(parsedTitle)
 
-	cleanTmdb := strings.Trim(strings.ToLower(stdTmdb), " .-_[]()/\\")
-	cleanParsed := strings.Trim(strings.ToLower(stdParsed), " .-_[]()/\\")
-
-	cleanTmdb = ExpandAbbreviations(cleanTmdb)
-	cleanParsed = ExpandAbbreviations(cleanParsed)
-
-	cleanTmdb = normalizeNumbersInTitle(cleanTmdb)
-	cleanParsed = normalizeNumbersInTitle(cleanParsed)
+	if cleanTmdb == "" || cleanParsed == "" {
+		return 0.0
+	}
 
 	if hasNumericMismatch(cleanTmdb, cleanParsed) {
 		return 0.0
@@ -1156,11 +1252,11 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 			}
 
 			if bestSim < config.SimilarityThreshold || matchingTitle == "" {
-				utils.Logger.Debug("filtering out series torrent: failed title similarity", 
-					"name", td.Name, 
-					"best_similarity", fmt.Sprintf("%.4f", bestSim), 
-					"threshold", config.SimilarityThreshold, 
-					"tmdb_title", tmdbShow.Title, 
+				utils.Logger.Debug("filtering out series torrent: failed title similarity",
+					"name", td.Name,
+					"best_similarity", fmt.Sprintf("%.4f", bestSim),
+					"threshold", config.SimilarityThreshold,
+					"tmdb_title", tmdbShow.Title,
 					"alt_titles", altTitles)
 				return nil
 			}
@@ -1313,21 +1409,21 @@ func FindBestSeriesStreamsLongRunning(ctx context.Context, tmdbShow *bitmagnet.T
 							Badges:      parser.FormatBadges(td.Name),
 						})
 					} else {
-						utils.Logger.Debug("filtering out series torrent: fallback failed (no season pack or episode match)", 
-							"name", td.Name, 
-							"parsed_season", parsed.Season, 
-							"parsed_episode", parsed.Episode, 
-							"requested_season", season, 
-							"requested_episode", episode, 
+						utils.Logger.Debug("filtering out series torrent: fallback failed (no season pack or episode match)",
+							"name", td.Name,
+							"parsed_season", parsed.Season,
+							"parsed_episode", parsed.Episode,
+							"requested_season", season,
+							"requested_episode", episode,
 							"is_season_pack", isSeasonPack)
 					}
 				}
 			} else {
-				utils.Logger.Debug("filtering out series torrent: parsed season/episode/date does not match requested", 
-					"name", td.Name, 
-					"parsed_season", parsed.Season, 
-					"parsed_episode", parsed.Episode, 
-					"requested_season", season, 
+				utils.Logger.Debug("filtering out series torrent: parsed season/episode/date does not match requested",
+					"name", td.Name,
+					"parsed_season", parsed.Season,
+					"parsed_episode", parsed.Episode,
+					"requested_season", season,
 					"requested_episode", episode)
 			}
 
@@ -1473,10 +1569,10 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 			}
 
 			if bestSim < config.SimilarityThreshold || matchingTitle == "" {
-				utils.Logger.Debug("filtering out movie torrent: failed title similarity", 
-					"name", td.Name, 
-					"best_similarity", fmt.Sprintf("%.4f", bestSim), 
-					"threshold", config.SimilarityThreshold, 
+				utils.Logger.Debug("filtering out movie torrent: failed title similarity",
+					"name", td.Name,
+					"best_similarity", fmt.Sprintf("%.4f", bestSim),
+					"threshold", config.SimilarityThreshold,
 					"tmdb_title", tmdbMovie.Title)
 				return nil
 			}
