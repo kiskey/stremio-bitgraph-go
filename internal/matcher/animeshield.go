@@ -92,8 +92,6 @@ func ClassifyTargetPrior(meta AnimePriorMeta) float64 {
 		} else if c == "CN" || c == "TW" || c == "KR" {
 			score += 5.0
 			isEasternAsia = true
-		} else if c == "US" || c == "CA" || c == "GB" || c == "FR" || c == "DE" || c == "AU" {
-			score -= 10.0
 		}
 	}
 
@@ -138,7 +136,8 @@ func ComputeCandidateScore(filename string) float64 {
 		score += 12.0
 	}
 	if animeBracketPrefixRe.MatchString(trimmed) {
-		score += 5.0
+		// Demoted from 5.0 to 1.0 to prevent false-positives on bracketed standard Western cartoon releases (Sonarr/Radarr Parity)
+		score += 1.0
 	}
 	if animeGroupRe.MatchString(filename) {
 		score += 6.0
