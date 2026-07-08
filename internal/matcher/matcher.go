@@ -175,21 +175,35 @@ var abbreviationMap = map[string][]string{
 	"ft":  {"feat", "featuring"},
 }
 
-// standardizePunctuation normalizes non-standard middle dots, curly quotes, and dashes to standard ASCII representations
+// standardizePunctuation normalizes dashes, quotes, and punctuation-heavy indicators (Sonarr/Radarr Parity)
 func standardizePunctuation(s string) string {
+	// Step 1: Strip apostrophes and quotes entirely to prevent trailing standalone noise letters (e.g. Marvel's -> Marvels)
+	s = strings.ReplaceAll(s, "'", "")
+	s = strings.ReplaceAll(s, "’", "")
+	s = strings.ReplaceAll(s, "‘", "")
+	s = strings.ReplaceAll(s, "´", "")
+	s = strings.ReplaceAll(s, "`", "")
+	s = strings.ReplaceAll(s, "\"", "")
+	s = strings.ReplaceAll(s, "“", "")
+	s = strings.ReplaceAll(s, "”", "")
+
+	// Step 2: Normalize Ampersands to "and" to ensure perfect keyword matching
+	s = strings.ReplaceAll(s, "&", " and ")
+
+	// Step 3: Replace non-standard dashes and middle dots with spaces
 	r := strings.NewReplacer(
 		"·", " ",
 		"•", " ",
-		"’", "'",
-		"‘", "'",
-		"´", "'",
-		"`", "'",
-		"“", "\"",
-		"”", "\"",
-		"—", "-",
-		"–", "-",
+		"—", " ",
+		"–", " ",
 	)
-	return r.Replace(s)
+	s = r.Replace(s)
+
+	// Step 4: Normalize hyphens and colons to standard spaces to align token boundaries (e.g. Wall-E -> Wall E)
+	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.ReplaceAll(s, ":", " ")
+
+	return s
 }
 
 func ExpandAbbreviations(title string) string {
