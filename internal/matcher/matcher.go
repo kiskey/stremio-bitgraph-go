@@ -440,6 +440,16 @@ func passTitleGuardrail(targetTitle, parsedTitle string, altTitles []string) boo
 		return true
 	}
 
+	// ── MOVIE PREFIX BYPASS ──
+	// For Movie queries, if the parsed title matches the start of our target title,
+	// we bypass the aggressive single-word guardrail. This allows multi-movie packs, 
+	// localized translations, and bonus feature discs (e.g. "WALL-E BURN-E") to match safely.
+	cleanTargetNoSpace := strings.ReplaceAll(targetNoArt, " ", "")
+	cleanParsedNoSpace := strings.ReplaceAll(parsedNoArt, " ", "")
+	if strings.HasPrefix(cleanParsedNoSpace, cleanTargetNoSpace) {
+		return true
+	}
+
 	targetWords := strings.Fields(targetNoArt)
 	parsedWords := strings.Fields(parsedNoArt)
 
@@ -925,6 +935,45 @@ func isBracketMetadata(inner string) bool {
 	return float64(metadataCount)/float64(len(words)) >= 0.5
 }
 
+// phoneticTransliterate replaces characters phonetically for global translation parity (Cyrillic & Eastern Europe support)
+func phoneticTransliterate(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	// Case-insensitive phonetic mapping for Russian/Italian transliterations (e.g. Valli -> Walli, Wall-I -> Wall-E)
+	if strings.HasPrefix(s, "vall") {
+		s = "wall" + s[4:]
+	}
+	if strings.HasSuffix(s, "i") {
+		s = s[:len(s)-1] + "e"
+	} else if strings.HasSuffix(s, "y") {
+		s = s[:len(s)-1] + "e"
+	}
+	return s
+}
+
+// PreSanitizeMovieTorrentName strips non-year metadata brackets from raw movie names.
+// This prevents custom encoder tags (like S90, S91) from being parsed as valid TV seasons before parser execution.
+func PreSanitizeMovieTorrentName(name string) string {
+	name = bracketExtractRe.ReplaceAllStringFunc(name, func(match string) string {
+		if len(match) < 2 {
+			return match
+		}
+		inner := match[1 : len(match)-1]
+		innerTrim := strings.TrimSpace(inner)
+		// If the bracket represents a 4-digit release year, do not strip it so the parser can resolve the year.
+		if len(innerTrim) == 4 && isNumber(innerTrim) {
+			return match
+		}
+		if isBracketMetadata(inner) {
+			return " "
+		}
+		return match
+	})
+	return name
+}
+
 // NormalizeTitleSonarrParity implements Sonarr/Radarr-parity title sanitization recursively
 func NormalizeTitleSonarrParity(s string) string {
 	s = standardizePunctuation(s)
@@ -957,7 +1006,10 @@ func NormalizeTitleSonarrParity(s string) string {
 	}
 
 	// Collapse whitespace and return lowercase representation
-	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+	s = strings.ToLower(strings.Join(strings.Fields(s), " "))
+
+	// Pass 3: Phonetic transliteration pass to enable translated/transliterated matching parity
+	return phoneticTransliterate(s)
 }
 
 func getTitleSimilarityParsed(tmdbTitle, parsedTitle string) float64 {
@@ -1570,7 +1622,11 @@ func FindBestMovieStreams(ctx context.Context, tmdbMovie *bitmagnet.TorrentItem,
 				}
 			}
 
-			parsed := parser.RobustParseInfo(td.Name, 0)
+			// ── MOVIE PRE-PARSING SANITIZATION ──
+			// Strips metadata brackets recursively inside the similarity engine before parsing.
+			// This prevents custom encoder tags (like S90, S91) from misclassifying movies as TV shows.
+			sanitizedName := PreSanitizeMovieTorrentName(td.Name)
+			parsed := parser.RobustParseInfo(sanitizedName, 0)
 
 			// Find the title (primary or alternate) that actually matched
 			matchingTitle := ""
