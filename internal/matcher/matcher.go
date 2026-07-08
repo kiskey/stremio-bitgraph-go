@@ -52,7 +52,7 @@ var metadataWords = map[string]bool{
 	"scr": true, "hq": true, "v2": true, "v3": true, "hc": true, "clean": true,
 	"imax": true, "h264": true, "x264": true, "h265": true, "x265": true,
 	"hevc": true, "aac": true, "aac3": true, "dts": true, "dd51": true,
-	"truehd": true, "atmos": true, "ac3": true, "mp3": true, "xvid": true, "divx": true,
+	"truehd": true, "ac3": true, "mp3": true, "xvid": true, "divx": true,
 	"av1": true, "vp9": true, "hdr10": true, "hdr": true, "dv": true,
 	"dolby": true, "vision": true, "atmos": true, "dts-hd": true, "ma": true,
 	"dual": true, "audio": true, "dubbed": true, "dub": true, "multi": true,
