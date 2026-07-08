@@ -52,7 +52,7 @@ var metadataWords = map[string]bool{
 	"scr": true, "hq": true, "v2": true, "v3": true, "hc": true, "clean": true,
 	"imax": true, "h264": true, "x264": true, "h265": true, "x265": true,
 	"hevc": true, "aac": true, "aac3": true, "dts": true, "dd51": true,
-	"truehd": true, "ac3": true, "mp3": true, "xvid": true, "divx": true,
+	"truehd": true, "atmos": true, "ac3": true, "mp3": true, "xvid": true, "divx": true,
 	"av1": true, "vp9": true, "hdr10": true, "hdr": true, "dv": true,
 	"dolby": true, "vision": true, "atmos": true, "dts-hd": true, "ma": true,
 	"dual": true, "audio": true, "dubbed": true, "dub": true, "multi": true,
@@ -86,10 +86,15 @@ var metadataWords = map[string]bool{
 	"ntsc": true, "pal": true, "open": true, "matte": true, "unrated": true, "rated": true,
 	"subbed": true, "rosubbed": true, "nlsubs": true, "engsub": true,
 
-	// Plural and multilingual metadata additions (Parity Sanitization Matrix)
-	"episodes": true, "seasons": true, "eps": true, "vost": true,
-	"subbed": true, "dubbed": true, "dual-audio": true, "multi-sub": true,
-	"spanish": true, "french": true, "german": true, "italian": true,
+	// Non-duplicate plural and multilingual additions (Parity Sanitization Matrix)
+	"episodes":   true,
+	"seasons":    true,
+	"eps":        true,
+	"vost":       true,
+	"dual-audio": true,
+	"multi-sub":  true,
+	"german":     true,
+	"italian":    true,
 }
 
 // sequelIndicators are words that strongly suggest a different franchise entry.
